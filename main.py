@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 import datasets
 import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset
-from engine import evaluate, train_one_epoch
+from engine import evaluate, train_one_epoch, evaluate_kitti
 from models import build_model
 
 
@@ -21,6 +21,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
     parser.add_argument('--lr_backbone', default=1e-5, type=float)
+    parser.add_argument('--lr_ft', default=1e-5, type=float)
     parser.add_argument('--batch_size', default=2, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=300, type=int)
@@ -59,6 +60,10 @@ def get_args_parser():
     # * Segmentation
     parser.add_argument('--masks', action='store_true',
                         help="Train segmentation head if the flag is provided")
+
+    # Fine tune
+    parser.add_argument('--ft_kitti', action='store_true',
+                        help="Fine tune Kitti 2d object detection")
 
     # Loss
     parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
@@ -120,6 +125,10 @@ def main(args):
     random.seed(seed)
 
     model, criterion, postprocessors = build_model(args)
+    if args.ft_kitti:
+        for name, parameter in model.named_parameters():
+            if "class_embed" not in name and "bbox_embed" not in name:
+                parameter.requires_grad_(False)
     model.to(device)
 
     model_without_ddp = model
@@ -129,13 +138,21 @@ def main(args):
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
-    param_dicts = [
-        {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},
-        {
-            "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" in n and p.requires_grad],
-            "lr": args.lr_backbone,
-        },
-    ]
+    if args.ft_kitti:
+        param_dicts = [
+            {
+                "params": [p for n, p in model_without_ddp.named_parameters() if ("class_embed" in n or "bbox_embed" in n) and p.requires_grad],
+                "lr": args.lr_ft,
+            },
+        ]
+    else:
+        param_dicts = [
+            {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},
+            {
+                "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" in n and p.requires_grad],
+                "lr": args.lr_backbone,
+            },
+        ]
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
                                   weight_decay=args.weight_decay)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
@@ -176,11 +193,17 @@ def main(args):
                 args.resume, map_location='cpu', check_hash=True)
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            args.start_epoch = checkpoint['epoch'] + 1
+        if args.ft_kitti:
+            module_dict = model_without_ddp.state_dict()
+            update_state_dict = {key: value for key, value in checkpoint['model'].items() if "class_embed" not in key and "bbox_embed" not in key}
+            module_dict.update(update_state_dict)
+            model_without_ddp.load_state_dict(module_dict)
+        else:
+            model_without_ddp.load_state_dict(checkpoint['model'])
+            if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+                args.start_epoch = checkpoint['epoch'] + 1
 
     if args.eval:
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
@@ -212,9 +235,12 @@ def main(args):
                     'args': args,
                 }, checkpoint_path)
 
-        test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
-        )
+        if args.ft_kitti:
+            test_stats, kitti_evaluator = evaluate_kitti(model, criterion, postprocessors, data_loader_val, device, args.output_dir)
+        else:
+            test_stats, coco_evaluator = evaluate(
+                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+            )
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},

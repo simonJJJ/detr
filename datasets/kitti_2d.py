@@ -107,6 +107,9 @@ class KITTI2D(torchvision.datasets.VisionDataset):
             return image, None
 
         target = {}
+        target["image_id"] = torch.tensor([self.sample_ids[idx]])
+        target["truncated"] = torch.tensor([data[1] for data in data_list])
+        target["occluded"] = torch.tensor([int(data[2]) for data in data_list])
         target["boxes"] = boxes
         target["labels"] = classes
         target["orig_size"] = torch.as_tensor([int(h), int(w)])
