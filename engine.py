@@ -172,7 +172,7 @@ def evaluate_kitti(model, criterion, postprocessors, data_loader, device, output
         weight_dict = criterion.weight_dict
 
         # reduce losses over all GPUs for logging purposes
-        loss_dict_reduced =  utils.reduce_dict(loss_dict)
+        loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_scaled = {k: v * weight_dict[k]
                                     for k, v in loss_dict_reduced.items() if k in weight_dict}
         loss_dict_reduced_unscaled = {f'{k}_unscaled': v
@@ -189,15 +189,15 @@ def evaluate_kitti(model, criterion, postprocessors, data_loader, device, output
         if kitti_evaluator is not None:
             kitti_evaluator.update(res, targets)
 
-        # gather the stats from all processes
-        metric_logger.synchronize_between_processes()
-        print("Averaged stats:", metric_logger)
-        if kitti_evaluator is not None:
-            kitti_evaluator.synchronize_between_processes()
+    # gather the stats from all processes
+    metric_logger.synchronize_between_processes()
+    print("Averaged stats:", metric_logger)
+    if kitti_evaluator is not None:
+        kitti_evaluator.synchronize_between_processes()
 
-        # accumulate predictions from all images
-        if kitti_evaluator is not None:
-            kitti_evaluator.accumulate()
-            kitti_evaluator.summarize()
-        stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    # accumulate predictions from all images
+    if kitti_evaluator is not None:
+        kitti_evaluator.accumulate()
+        kitti_evaluator.summarize()
+    stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
     return stats, kitti_evaluator

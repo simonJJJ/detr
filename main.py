@@ -127,7 +127,7 @@ def main(args):
     model, criterion, postprocessors = build_model(args)
     if args.ft_kitti:
         for name, parameter in model.named_parameters():
-            if "class_embed" not in name and "bbox_embed" not in name:
+            if "class_embed" not in name and "bbox_embed" not in name and "transformer" not in name:
                 parameter.requires_grad_(False)
     model.to(device)
 
@@ -141,7 +141,7 @@ def main(args):
     if args.ft_kitti:
         param_dicts = [
             {
-                "params": [p for n, p in model_without_ddp.named_parameters() if ("class_embed" in n or "bbox_embed" in n) and p.requires_grad],
+                "params": [p for n, p in model_without_ddp.named_parameters() if ("class_embed" in n or "bbox_embed" in n or "transformer" in n) and p.requires_grad],
                 "lr": args.lr_ft,
             },
         ]
@@ -195,7 +195,7 @@ def main(args):
             checkpoint = torch.load(args.resume, map_location='cpu')
         if args.ft_kitti:
             module_dict = model_without_ddp.state_dict()
-            update_state_dict = {key: value for key, value in checkpoint['model'].items() if "class_embed" not in key and "bbox_embed" not in key}
+            update_state_dict = {key: value for key, value in checkpoint['model'].items() if "class_embed" not in key}
             module_dict.update(update_state_dict)
             model_without_ddp.load_state_dict(module_dict)
         else:

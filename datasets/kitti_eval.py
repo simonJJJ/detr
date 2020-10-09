@@ -8,6 +8,7 @@ import numpy as np
 import numba
 
 from util.misc import all_gather
+from util.box_ops import box_cxcywh_to_xyxy
 
 
 class KittiEvaluator(object):
@@ -51,11 +52,15 @@ class KittiEvaluator(object):
         img_ids = list(np.unique(list(predictions.keys())))
         self.img_ids.extend(img_ids)
         for pred in predictions.values():
+            for key, value in pred.items():
+                pred[key] = value.cpu().numpy()
             self.dt_annos.append(pred)
         for target in targets:
             orig_target_size = target['orig_size']
             img_h, img_w = torch.split(orig_target_size, 1, dim=0)
-            target['boxes'] = target['boxes'] * torch.cat([img_w, img_h, img_w, img_h], dim=0)
+            target['boxes'] = box_cxcywh_to_xyxy(target['boxes']) * torch.cat([img_w, img_h, img_w, img_h], dim=0)
+            for key, value in target.items():
+                target[key] = value.cpu().numpy()
             self.gt_annos.append(target)
 
     def synchronize_between_processes(self):
@@ -69,16 +74,16 @@ class KittiEvaluator(object):
 
         merged_dt_annos = []
         for p in all_dt_annos:
-            merged_dt_annos.append(p)
+            merged_dt_annos.extend(p)
 
         merged_gt_annos = []
         for p in all_gt_annos:
-            merged_gt_annos.append(p)
+            merged_gt_annos.extend(p)
 
         merged_img_ids = np.array(merge_img_ids)
         merged_img_ids, idx = np.unique(merged_img_ids, return_index=True)
-        merged_dt_annos = np.array(merged_dt_annos[0])[idx]
-        merged_gt_annos = np.array(merged_gt_annos[0])[idx]
+        merged_dt_annos = np.array(merged_dt_annos)[idx]
+        merged_gt_annos = np.array(merged_gt_annos)[idx]
         self.img_ids = list(merged_img_ids)
         self.dt_annos = list(merged_dt_annos)
         self.gt_annos = list(merged_gt_annos)
@@ -197,7 +202,7 @@ def print_str(value, *arg, sstream=None):
     return sstream.getvalue()
 
 
-def get_split_parts(self, num, num_part):
+def get_split_parts(num, num_part):
     same_part = num // num_part
     remain_num = num % num_part
     if remain_num == 0:
@@ -224,7 +229,7 @@ def calculate_iou_partly(gt_annos, dt_annos, metric, num_parts=50):
         if metric == 0:
             gt_boxes = np.concatenate([a["boxes"] for a in gt_annos_part], 0)
             dt_boxes = np.concatenate([a["boxes"] for a in dt_annos_part], 0)
-            overlap_part = image_box_overlap(gt_boxes, gt_boxes)
+            overlap_part = image_box_overlap(gt_boxes, dt_boxes)
         else:
             raise ValueError("unknown metric")
         parted_overlaps.append(overlap_part)
@@ -294,7 +299,7 @@ def image_box_overlap(boxes, query_boxes, criterion=-1):
                         ua = qbox_area
                     else:
                         ua = 1.0
-                    overlaps[n, k] - iw * ih / ua
+                    overlaps[n, k] = iw * ih / ua
     return overlaps
 
 
@@ -384,15 +389,16 @@ def compute_statistics_jit(overlaps,
         if metric == 0:
             overlaps_dt_dc = image_box_overlap(dt_bboxes, dc_bboxes, 0)
             for i in range(dc_bboxes.shape[0]):
-                if (assigned_detection[j]):
-                    continue
-                if (ignored_det[j] == -1 or ignored_det[j] == 1):
-                    continue
-                if (ignored_threshold[j]):
-                    continue
-                if overlaps_dt_dc[j, i] > min_overlap:
-                    assigned_detection[j] = True
-                    nstuff += 1
+                for j in range(det_size):
+                    if (assigned_detection[j]):
+                        continue
+                    if (ignored_det[j] == -1 or ignored_det[j] == 1):
+                        continue
+                    if (ignored_threshold[j]):
+                        continue
+                    if overlaps_dt_dc[j, i] > min_overlap:
+                        assigned_detection[j] = True
+                        nstuff += 1
         fp -= nstuff
 
     return tp, fp, fn, similarity, thresholds[:thresh_idx]
@@ -460,7 +466,7 @@ def clean_data(gt_anno, dt_anno, current_class, difficulty):
     num_valid_gt = 0
     for i in range(num_gt):
         bbox = gt_anno["boxes"][i]
-        gt_name = current_cls_name.index(gt_anno["labels"][i])
+        gt_name = CLASS_NAMES[gt_anno["labels"][i] - 1]
         height = bbox[3] - bbox[1]
         valid_class = -1
         if (gt_name == current_cls_name):
@@ -486,10 +492,10 @@ def clean_data(gt_anno, dt_anno, current_class, difficulty):
         else:
             ignored_gt.append(-1)
     # for i in range(num_gt):
-        if CLASS_NAMES.index(gt_anno["labels"][i]) == "DontCare":
+        if CLASS_NAMES[gt_anno["labels"][i] - 1] == "DontCare":
             dc_bboxes.append(gt_anno["boxes"][i])
     for i in range(num_dt):
-        if (CLASS_NAMES.index(dt_anno["labels"][i]).lower() == current_cls_name):
+        if (CLASS_NAMES[dt_anno["labels"][i] - 1].lower() == current_cls_name):
             valid_class = 1
         else:
             valid_class = -1
@@ -529,8 +535,7 @@ def _prepare_data(gt_annos, dt_annos, current_class, difficulty):
         total_dc_num.append(dc_bboxes.shape[0])
         dontcares.append(dc_bboxes)
         total_num_valid_gt += num_valid_gt
-        gt_datas = np.concatenate(
-            gt_annos[i]["boxes"], 1)
+        gt_datas = gt_annos[i]["boxes"]
         dt_datas = np.concatenate([
             dt_annos[i]["boxes"], dt_annos[i]["scores"][..., np.newaxis]
         ], 1)
