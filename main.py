@@ -56,6 +56,7 @@ def get_args_parser():
     parser.add_argument('--num_queries', default=100, type=int,
                         help="Number of query slots")
     parser.add_argument('--pre_norm', action='store_true')
+    parser.add_argument('--cc_tr', action='store_true')
 
     # * Segmentation
     parser.add_argument('--masks', action='store_true',
@@ -125,10 +126,10 @@ def main(args):
     random.seed(seed)
 
     model, criterion, postprocessors = build_model(args)
-    if args.ft_kitti:
-        for name, parameter in model.named_parameters():
-            if "class_embed" not in name and "bbox_embed" not in name and "transformer" not in name:
-                parameter.requires_grad_(False)
+    #if args.ft_kitti:
+    #    for name, parameter in model.named_parameters():
+    #        if "class_embed" not in name and "bbox_embed" not in name and "transformer" not in name:
+    #            parameter.requires_grad_(False)
     model.to(device)
 
     model_without_ddp = model
@@ -139,9 +140,21 @@ def main(args):
     print('number of params:', n_parameters)
 
     if args.ft_kitti:
+        if args.cc_tr:
+            param_dicts = [
+                {
+                    "params": [p for n, p in model_without_ddp.named_parameters() if "encoder" not in n and p.requires_grad],
+                    "lr": args.lr_ft
+                },
+                {
+                    "params": [p for n, p in model_without_ddp.named_parameters() if "encoder" in n and p.requires_grad],
+                    "lr": args.lr
+                }
+            ]
         param_dicts = [
             {
-                "params": [p for n, p in model_without_ddp.named_parameters() if ("class_embed" in n or "bbox_embed" in n or "transformer" in n) and p.requires_grad],
+                #"params": [p for n, p in model_without_ddp.named_parameters() if ("class_embed" in n or "bbox_embed" in n or "transformer" in n) and p.requires_grad],
+                "params": [p for n, p in model_without_ddp.named_parameters() if p.requires_grad],
                 "lr": args.lr_ft,
             },
         ]
@@ -195,7 +208,7 @@ def main(args):
             checkpoint = torch.load(args.resume, map_location='cpu')
         if args.ft_kitti:
             module_dict = model_without_ddp.state_dict()
-            update_state_dict = {key: value for key, value in checkpoint['model'].items() if "class_embed" not in key}
+            update_state_dict = {key: value for key, value in checkpoint['model'].items() if "class_embed" not in key and "encoder" not in key}
             module_dict.update(update_state_dict)
             model_without_ddp.load_state_dict(module_dict)
         else:

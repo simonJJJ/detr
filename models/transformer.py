@@ -13,6 +13,11 @@ from typing import Optional, List
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
+from torch.nn.parameter import Parameter
+from torch.nn.init import xavier_uniform_
+from torch.nn.init import constant_
+from torch.nn.init import xavier_normal_
+from modules.cc_attention import RCCAModule
 
 
 class Transformer(nn.Module):
@@ -269,11 +274,189 @@ class TransformerDecoderLayer(nn.Module):
                                  tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos)
 
 
+class CCMultiheadAttention(nn.Module):
+    """
+    This code is modified from https://github.com/pytorch/pytorch/blob/17f8c329dfb5c00df1f1c6de4c2d9257529abb6f/torch/nn/modules/activation.py#L831
+    """
+    def __init__(self, embed_dim, num_heads, dropout=0., bias=True, add_bias_kv=False, add_zero_attn=False, kdim=None, vdim=None):
+        super(CCMultiheadAttention, self).__init__()
+        self.embed_dim = embed_dim
+        self.kdim = kdim if kdim is not None else embed_dim
+        self.vdim = vdim if vdim is not None else embed_dim
+        self._qkv_same_embed_dim = self.kdim == embed_dim and self.vdim == embed_dim
+
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
+
+        if self._qkv_same_embed_dim is False:
+            self.q_proj_weight = Parameter(torch.Tensor(embed_dim, embed_dim))
+            self.k_proj_weight = Parameter(torch.Tensor(embed_dim, self.kdim))
+            self.v_proj_weight = Parameter(torch.Tensor(embed_dim, self.vdim))
+            self.register_parameter('in_proj_weight', None)
+        else:
+            self.in_proj_weight = Parameter(torch.empty(3 * embed_dim, embed_dim))
+            self.register_parameter('q_proj_weight', None)
+            self.register_parameter('k_proj_weight', None)
+            self.register_parameter('v_proj_weight', None)
+
+        if bias:
+            self.in_proj_bias = Parameter(torch.empty(3 * embed_dim))
+        else:
+            self.register_parameter('in_proj_bias', None)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+
+        if add_bias_kv:
+            self.bias_k = Parameter(torch.empty(1, 1, embed_dim))
+            self.bias_v = Parameter(torch.empty(1, 1, embed_dim))
+        else:
+            self.bias_k = self.bias_v = None
+
+        self.add_zero_attn = add_zero_attn
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        if self._qkv_same_embed_dim:
+            xavier_uniform_(self.in_proj_weight)
+        else:
+            xavier_uniform_(self.q_proj_weight)
+            xavier_uniform_(self.k_proj_weight)
+            xavier_uniform_(self.v_proj_weight)
+
+        if self.in_proj_bias is not None:
+            constant_(self.in_proj_bias, 0.)
+            constant_(self.out_proj.bias, 0.)
+        if self.bias_k is not None:
+            xavier_normal_(self.bias_k)
+        if self.bias_v is not None:
+            xavier_normal_(self.bias_v)
+
+    def forward(self, query, key, value, key_padding_mask=None,
+                need_weights=True, attn_mask=None):
+        # type: (Tensor, Tensor, Tensor, Optional[Tensor], bool, Optional[Tensor]) -> Tuple[Tensor, Optional[Tensor]]
+        r"""
+        Shape:
+            - Inputs:
+            - query: :math:`(L, N, E)` where L is the target sequence length, N is the batch size, E is
+              the embedding dimension.
+            - key: :math:`(S, N, E)`, where S is the source sequence length, N is the batch size, E is
+              the embedding dimension.
+            - value: :math:`(S, N, E)` where S is the source sequence length, N is the batch size, E is
+              the embedding dimension.
+            - key_padding_mask: :math:`(N, S)` where N is the batch size, S is the source sequence length.
+              If a ByteTensor is provided, the non-zero positions will be ignored while the position
+              with the zero positions will be unchanged. If a BoolTensor is provided, the positions with the
+              value of ``True`` will be ignored while the position with the value of ``False`` will be unchanged.
+            - attn_mask: 2D mask :math:`(L, S)` where L is the target sequence length, S is the source sequence length.
+              3D mask :math:`(N*num_heads, L, S)` where N is the batch size, L is the target sequence length,
+              S is the source sequence length. attn_mask ensure that position i is allowed to attend the unmasked
+              positions. If a ByteTensor is provided, the non-zero positions are not allowed to attend
+              while the zero positions will be unchanged. If a BoolTensor is provided, positions with ``True``
+              is not allowed to attend while ``False`` values will be unchanged. If a FloatTensor
+              is provided, it will be added to the attention weight.
+
+            - Outputs:
+            - attn_output: :math:`(L, N, E)` where L is the target sequence length, N is the batch size,
+              E is the embedding dimension.
+            - attn_output_weights: :math:`(N, L, S)` where N is the batch size,
+              L is the target sequence length, S is the source sequence length.
+        """
+        tgt_len, bsz, embed_dim = query.size()
+        assert embed_dim == self.embed_dim
+        # allow MHA to have different sizes for the feature dimension
+        assert key.size(0) == value.size(0) and key.size(1) == value.size(1)
+
+
+class CCTransformer(nn.Module):
+    def __init__(self, d_model=512, nhead=8, num_encoder_layers=6,
+                 num_decoder_layers=6, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", normalize_before=False,
+                 return_intermediate_dec=False):
+        super().__init__()
+
+        encoder_layer = CCTransformerEncoderLayer(d_model)
+        self.encoder = CCTransformerEncoder(encoder_layer, num_encoder_layers)
+
+        decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
+        decoder_norm = nn.LayerNorm(d_model)
+        self.decoder = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
+                                          return_intermediate=return_intermediate_dec)
+
+        self._reset_parameters()
+
+        self.d_model = d_model
+        self.nhead = nhead
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def forward(self, src, mask, query_embed, pos_embed):
+        # flatten NxCxHxW to HWxNxC
+        bs = src.shape[0]
+        query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
+        mask = mask.flatten(1)
+
+        tgt = torch.zeros_like(query_embed)
+        memory = self.encoder(src, pos=pos_embed)
+        bs, c, h, w = memory.shape
+        memory = memory.flatten(2).permute(2, 0, 1)
+        pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
+        hs = self.decoder(tgt, memory, memory_key_padding_mask=mask,
+                          pos=pos_embed, query_pos=query_embed)
+        return hs.transpose(1, 2), memory.permute(1, 2, 0).view(bs, c, h, w)
+
+
+class CCTransformerEncoder(nn.Module):
+    def __init__(self, encoder_layer, num_layers):
+        super().__init__()
+        self.layers = _get_clones(encoder_layer, num_layers)
+        self.num_layers = num_layers
+
+    def forward(self, src,
+                pos: Optional[Tensor] = None):
+        output = src
+
+        for layer in self.layers:
+            output = layer(output, pos=pos)
+
+        return output
+
+
+class CCTransformerEncoderLayer(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.rcca = RCCAModule(in_channels)
+
+    def with_pos_embed(self, tensor, pos: Optional[Tensor]):
+        return tensor if pos is None else tensor + pos
+
+    def forward(self, src, pos: Optional[Tensor] = None):
+        src = self.with_pos_embed(src, pos)
+        out = self.rcca(src)
+        return out
+
+
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
 
 def build_transformer(args):
+    if args.cc_tr:
+        return CCTransformer(
+            d_model=args.hidden_dim,
+            dropout=args.dropout,
+            nhead=args.nheads,
+            dim_feedforward=args.dim_feedforward,
+            num_encoder_layers=args.enc_layers,
+            num_decoder_layers=args.dec_layers,
+            normalize_before=args.pre_norm,
+            return_intermediate_dec=True,
+        )
     return Transformer(
         d_model=args.hidden_dim,
         dropout=args.dropout,
