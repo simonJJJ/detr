@@ -143,21 +143,22 @@ def main(args):
         if args.cc_tr:
             param_dicts = [
                 {
-                    "params": [p for n, p in model_without_ddp.named_parameters() if "encoder" not in n and p.requires_grad],
-                    "lr": args.lr_ft
+                    "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad],
+                    "lr": args.lr,
                 },
                 {
-                    "params": [p for n, p in model_without_ddp.named_parameters() if "encoder" in n and p.requires_grad],
-                    "lr": args.lr
-                }
+                    "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" in n and p.requires_grad],
+                    "lr": args.lr_backbone,
+                },
             ]
-        param_dicts = [
-            {
-                #"params": [p for n, p in model_without_ddp.named_parameters() if ("class_embed" in n or "bbox_embed" in n or "transformer" in n) and p.requires_grad],
-                "params": [p for n, p in model_without_ddp.named_parameters() if p.requires_grad],
-                "lr": args.lr_ft,
-            },
-        ]
+        else:
+            param_dicts = [
+                {
+                    #"params": [p for n, p in model_without_ddp.named_parameters() if ("class_embed" in n or "bbox_embed" in n or "transformer" in n) and p.requires_grad],
+                    "params": [p for n, p in model_without_ddp.named_parameters() if p.requires_grad],
+                    "lr": args.lr_ft,
+                },
+            ]
     else:
         param_dicts = [
             {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},

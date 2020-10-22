@@ -402,7 +402,7 @@ class CCTransformer(nn.Module):
         mask = mask.flatten(1)
 
         tgt = torch.zeros_like(query_embed)
-        memory = self.encoder(src, pos=pos_embed)
+        memory = self.encoder(src, pos=None)
         bs, c, h, w = memory.shape
         memory = memory.flatten(2).permute(2, 0, 1)
         pos_embed = pos_embed.flatten(2).permute(2, 0, 1)

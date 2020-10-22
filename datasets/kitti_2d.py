@@ -9,6 +9,7 @@ import os
 import numpy as np
 from PIL import Image
 import time
+import io
 
 import datasets.transforms as T
 
@@ -50,7 +51,8 @@ class KITTI2D(torchvision.datasets.VisionDataset):
         """
         while True:
             sample_id = self.sample_ids[index]
-            img = Image.open(os.path.join(self.root, '%06d.png' % sample_id)).convert('RGB')
+            #img = Image.open(os.path.join(self.root, '%06d.png' % sample_id))
+            img = self.BytePILRead(os.path.join(self.root, '%06d.png' % sample_id))
             img, target = self.prepare(img, index)
             if target is None and self.mode == "train":
                 index = self._rand_another(index)
@@ -116,6 +118,19 @@ class KITTI2D(torchvision.datasets.VisionDataset):
         target["size"] = torch.as_tensor([int(h), int(w)])
 
         return image, target
+
+    def BytePILRead(self, filepath):
+        img_bytes = self.HardDistGet(filepath)
+        buff = io.BytesIO(img_bytes)
+        img = Image.open(buff)
+        return img
+
+    def HardDistGet(self, filepath):
+        filepath = str(filepath)
+        with open(filepath, 'rb') as f:
+            value_buf = f.read()
+        return value_buf
+
 
 
 def make_kitti_transforms(image_set):

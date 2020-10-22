@@ -79,12 +79,12 @@ class RCCAModule(nn.Module):
         inter_channels = in_channels // 4
         self.conva = nn.Sequential(
             nn.Conv2d(in_channels, inter_channels, 3, padding=1, bias=False),
-            norm_layer(inter_channels),
+            #norm_layer(inter_channels),
             nn.ReLU(True))
         self.cca = CrissCrossAttention(inter_channels)
         self.convb = nn.Sequential(
             nn.Conv2d(inter_channels, in_channels, 3, padding=1, bias=False),
-            norm_layer(in_channels),
+            #norm_layer(in_channels),
             nn.ReLU(True))
 
     def forward(self, x):
