@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 import datasets
 import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset
-from engine import evaluate, train_one_epoch, evaluate_kitti
+from engine import evaluate, train_one_epoch, evaluate_kitti, evaluate_voc
 from models import build_model
 
 
@@ -65,6 +65,8 @@ def get_args_parser():
     # Fine tune
     parser.add_argument('--ft_kitti', action='store_true',
                         help="Fine tune Kitti 2d object detection")
+    parser.add_argument('--ft_voc', action='store_true',
+                        help="Fine tune Pascal VOC object detection")
 
     # Loss
     parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
@@ -139,12 +141,16 @@ def main(args):
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
-    if args.ft_kitti:
+    if args.ft_kitti or args.ft_voc:
         if args.cc_tr:
             param_dicts = [
                 {
-                    "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad],
+                    "params": [p for n, p in model_without_ddp.named_parameters() if "encoder" in n and p.requires_grad],
                     "lr": args.lr,
+                },
+                {
+                    "params": [p for n, p in model_without_ddp.named_parameters() if ("backbone" not in n and "encoder" not in n) and p.requires_grad],
+                    "lr": args.lr_ft,
                 },
                 {
                     "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" in n and p.requires_grad],
@@ -209,7 +215,10 @@ def main(args):
             checkpoint = torch.load(args.resume, map_location='cpu')
         if args.ft_kitti:
             module_dict = model_without_ddp.state_dict()
-            update_state_dict = {key: value for key, value in checkpoint['model'].items() if "class_embed" not in key and "encoder" not in key}
+            if args.cc_tr:
+                update_state_dict = {key: value for key, value in checkpoint['model'].items() if "class_embed" not in key and "encoder" not in key}
+            else:
+                update_state_dict = {key: value for key, value in checkpoint['model'].items() if "class_embed" not in key}
             module_dict.update(update_state_dict)
             model_without_ddp.load_state_dict(module_dict)
         else:
@@ -251,6 +260,8 @@ def main(args):
 
         if args.ft_kitti:
             test_stats, kitti_evaluator = evaluate_kitti(model, criterion, postprocessors, data_loader_val, device, args.output_dir)
+        elif args.ft_voc:
+            test_stats, voc_evaluator = evaluate_voc(model, criterion, postprocessors, data_loader_val, device, args.output_dir)
         else:
             test_stats, coco_evaluator = evaluate(
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
@@ -284,6 +295,7 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
+    assert not (args.ft_kitti and args.ft_voc), "just support fine tune one dataset now."
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)
