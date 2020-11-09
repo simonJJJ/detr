@@ -4,7 +4,6 @@ Pascal VOC detection dataset.
 import torch
 import torchvision
 import os
-import numpy as np
 import time
 import io
 import xml.etree.ElementTree as ET
@@ -12,7 +11,6 @@ import datasets.transforms as T
 
 from pathlib import Path
 from PIL import Image
-from tqdm import tqdm
 
 
 class PascalVOC(torchvision.datasets.VisionDataset):
@@ -59,7 +57,7 @@ class PascalVOC(torchvision.datasets.VisionDataset):
                  target_transform=None,
                  transforms=None,
                  use_difficult=False):
-        super(PascalVOC, self).__init__(image_folder, transforms=None, trnasform=None, target_transform=None)
+        super(PascalVOC, self).__init__(image_folder, transforms=None, transform=None, target_transform=None)
         self._transforms = transforms
         self.ann_folder = ann_folder
         self.class_names = type(self).CLASSES
@@ -78,7 +76,7 @@ class PascalVOC(torchvision.datasets.VisionDataset):
             index (int): Index
         """
         sample_id = self.sample_ids[index]
-        img = self.BytePILRead(os.path.join(self.root, sample_id + ".jpg"))
+        img = self.BytePILRead(os.path.join(self.root, "%s.jpg") % sample_id)
         target = self.anns[index]
         if self._transforms is not None:
             img, target = self._transforms(img, target)
@@ -93,13 +91,13 @@ class PascalVOC(torchvision.datasets.VisionDataset):
     def load_anns(self):
         print('loading pascal voc annotations into memory...')
         tic = time.time()
-        for image_id in tqdm(self.sample_ids):
+        for image_id in self.sample_ids:
             label_path = os.path.join(
-                self.ann_folder, image_id + ".xml"
-            )
+                self.ann_folder, "%s.xml"
+            ) % image_id
             anno = ET.parse(label_path).getroot()
             anno = self._preprocess_annotation(anno)
-            anno["image_id"] = image_id
+            anno["image_id"] = torch.tensor(int(image_id))
             self.anns.append(anno)
         print('Done (t={:0.2f}s'.format(time.time() - tic))
 
@@ -190,8 +188,8 @@ def build(image_set, args):
     root = Path(args.voc_path)
     assert root.exists(), f'provided VOC path {root} dose not exit'
     PATHS = {
-        "train": (root / "VOC0712" / "JPEGImages", root / "VOC0712" / "Annotations", root / "VOC0712" / "ImageSet" / "Main" / 'trainval.txt'),
-        "val": (root / "VOCtest" / "JPEGImages", root / "VOCtest" / "Annotations", root / "VOCtest" / "ImageSet" / "Main" / 'test.txt'),
+        "train": (root / "VOC0712" / "JPEGImages", root / "VOC0712" / "Annotations", root / "VOC0712" / "ImageSets" / "Main" / 'trainval.txt'),
+        "val": (root / "VOCtest" / "JPEGImages", root / "VOCtest" / "Annotations", root / "VOCtest" / "ImageSets" / "Main" / 'test.txt'),
     }
 
     img_folder, ann_folder, index_file = PATHS[image_set]
