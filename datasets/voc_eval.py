@@ -11,6 +11,31 @@ from util.box_np_ops import box_iou_np
 
 
 class VocEvaluator(object):
+
+    CLASSES = (
+        "__background__ ",
+        "aeroplane",
+        "bicycle",
+        "bird",
+        "boat",
+        "bottle",
+        "bus",
+        "car",
+        "cat",
+        "chair",
+        "cow",
+        "diningtable",
+        "dog",
+        "horse",
+        "motorbike",
+        "person",
+        "pottedplant",
+        "sheep",
+        "sofa",
+        "train",
+        "tvmonitor",
+    )
+
     def __init__(self):
         self.img_ids = []
         self.dt_annos = []
@@ -54,15 +79,15 @@ class VocEvaluator(object):
 
     def accumulate(self):
         prec, rec = self.calc_detection_voc_pred_rec(self.gt_annos, self.dt_annos)
-        self.aps = self.calc_detection_voc_ap(prec, rec, use_07_metric=use_07_metric)
+        self.aps = self.calc_detection_voc_ap(prec, rec, use_07_metric=False)
 
     def summarize(self):
-        print('Mean AP = {:.4f}'.format(np.mean(self.aps)))
+        print('Mean AP = {:.4f}'.format(np.mean(self.aps[1:])))
         print('~~~~~~~~')
         print('Results:')
-        for ap in self.aps:
-            print('{:.3f}'.format(ap))
-        print('{:.3f}'.format(np.mean(self.aps)))
+        for i, ap in enumerate(self.aps[1:]):
+            print('{:}, {:.3f}'.format(type(self).CLASSES[i + 1], ap))
+        print('{:.3f}'.format(np.mean(self.aps[1:])))
         print('~~~~~~~~')
         print('')
         print('--------------------------------------------------------------')

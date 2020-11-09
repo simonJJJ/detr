@@ -41,8 +41,8 @@ class KittiEvaluator(object):
             else:
                 current_classes_int.append(curcls)
         self.current_classes = current_classes_int
-        min_overlaps = np.stack([type(self).OVERLAP_0_7, type(self).OVERLAP_0_5], axis=0)
-        self.min_overlaps = min_overlaps[:, :, self.current_classes]
+        min_overlaps = np.stack([type(self).OVERLAP_0_7, type(self).OVERLAP_0_5], axis=0)  # [2, 3, 8]
+        self.min_overlaps = min_overlaps[:, :, self.current_classes]  # [2, 3, 3]
 
         self.img_ids = []
         self.dt_annos = []
@@ -68,9 +68,9 @@ class KittiEvaluator(object):
         all_dt_annos = all_gather(self.dt_annos)
         all_gt_annos = all_gather(self.gt_annos)
 
-        merge_img_ids = []
+        merged_img_ids = []
         for p in all_img_ids:
-            merge_img_ids.extend(p)
+            merged_img_ids.extend(p)
 
         merged_dt_annos = []
         for p in all_dt_annos:
@@ -80,10 +80,6 @@ class KittiEvaluator(object):
         for p in all_gt_annos:
             merged_gt_annos.extend(p)
 
-        merged_img_ids = np.array(merge_img_ids)
-        merged_img_ids, idx = np.unique(merged_img_ids, return_index=True)
-        merged_dt_annos = np.array(merged_dt_annos)[idx]
-        merged_gt_annos = np.array(merged_gt_annos)[idx]
         self.img_ids = list(merged_img_ids)
         self.dt_annos = list(merged_dt_annos)
         self.gt_annos = list(merged_gt_annos)
@@ -455,18 +451,18 @@ def fused_compute_statistics(overlaps,
 
 
 def clean_data(gt_anno, dt_anno, current_class, difficulty):
-    CLASS_NAMES = ['car', 'pedestrian', 'cyclist', 'van', 'person_sitting', 'car', 'tractor', 'trailer']
+    CLASS_NAMES = ['__bg__', 'car', 'pedestrian', 'cyclist', 'van', 'person_sitting', 'car', 'tractor', 'trailer']
     MIN_HEIGHT = [40, 25, 25]
     MAX_OCCLUSION = [0, 1, 2]
     MAX_TRUNCATION = [0.15, 0.3, 0.5]
     dc_bboxes, ignored_gt, ignored_dt = [], [], []
-    current_cls_name = CLASS_NAMES[current_class].lower()
+    current_cls_name = CLASS_NAMES[current_class + 1].lower()
     num_gt = len(gt_anno["labels"])
     num_dt = len(dt_anno["labels"])
     num_valid_gt = 0
     for i in range(num_gt):
         bbox = gt_anno["boxes"][i]
-        gt_name = CLASS_NAMES[gt_anno["labels"][i] - 1]
+        gt_name = CLASS_NAMES[gt_anno["labels"][i]]
         height = bbox[3] - bbox[1]
         valid_class = -1
         if (gt_name == current_cls_name):
@@ -492,10 +488,10 @@ def clean_data(gt_anno, dt_anno, current_class, difficulty):
         else:
             ignored_gt.append(-1)
     # for i in range(num_gt):
-        if CLASS_NAMES[gt_anno["labels"][i] - 1] == "DontCare":
+        if CLASS_NAMES[gt_anno["labels"][i]] == "DontCare":
             dc_bboxes.append(gt_anno["boxes"][i])
     for i in range(num_dt):
-        if (CLASS_NAMES[dt_anno["labels"][i] - 1].lower() == current_cls_name):
+        if (CLASS_NAMES[dt_anno["labels"][i]].lower() == current_cls_name):
             valid_class = 1
         else:
             valid_class = -1
