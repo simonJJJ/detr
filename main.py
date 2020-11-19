@@ -91,6 +91,7 @@ def get_args_parser():
     parser.add_argument('--coco_path', type=str)
     parser.add_argument('--coco_panoptic_path', type=str)
     parser.add_argument('--kitti_path', type=str)
+    parser.add_argument('--voc_path', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
 
     parser.add_argument('--output_dir', default='',
@@ -213,7 +214,7 @@ def main(args):
                 args.resume, map_location='cpu', check_hash=True)
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
-        if args.ft_kitti:
+        if args.ft_kitti or args.ft_voc:
             module_dict = model_without_ddp.state_dict()
             if args.cc_tr:
                 update_state_dict = {key: value for key, value in checkpoint['model'].items() if "class_embed" not in key and "encoder" not in key}
@@ -258,9 +259,9 @@ def main(args):
                     'args': args,
                 }, checkpoint_path)
 
-        if args.ft_kitti:
+        if args.dataset_file == "kitti_2d":
             test_stats, kitti_evaluator = evaluate_kitti(model, criterion, postprocessors, data_loader_val, device, args.output_dir)
-        elif args.ft_voc:
+        elif args.dataset_file == "voc":
             test_stats, voc_evaluator = evaluate_voc(model, criterion, postprocessors, data_loader_val, device, args.output_dir)
         else:
             test_stats, coco_evaluator = evaluate(
