@@ -8,6 +8,7 @@ import time
 import io
 import xml.etree.ElementTree as ET
 import datasets.transforms as T
+import util.misc as utils
 
 from pathlib import Path
 from PIL import Image
@@ -78,6 +79,9 @@ class PascalVOC(torchvision.datasets.VisionDataset):
         sample_id = self.sample_ids[index]
         img = self.BytePILRead(os.path.join(self.root, "%s.jpg") % sample_id)
         target = self.anns[index]
+        target = ET.parse(target).getroot()
+        target = self._preprocess_annotation(target)
+        target["image_id"] = torch.tensor(int(sample_id))
         if self._transforms is not None:
             img, target = self._transforms(img, target)
         return img, target
@@ -95,10 +99,7 @@ class PascalVOC(torchvision.datasets.VisionDataset):
             label_path = os.path.join(
                 self.ann_folder, "%s.xml"
             ) % image_id
-            anno = ET.parse(label_path).getroot()
-            anno = self._preprocess_annotation(anno)
-            anno["image_id"] = torch.tensor(int(image_id))
-            self.anns.append(anno)
+            self.anns.append(label_path)
         print('Done (t={:0.2f}s'.format(time.time() - tic))
 
     def _preprocess_annotation(self, target):
@@ -175,6 +176,7 @@ def make_pascalvoc_transforms(image_set):
     if image_set == 'train':
         return T.Compose([
             T.RandomHorizontalFlip(),
+            T.Resize((512, 512)),
             normalize,
         ])
     elif image_set == 'val':

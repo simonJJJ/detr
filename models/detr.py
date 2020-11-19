@@ -20,7 +20,7 @@ from .transformer import build_transformer
 
 class DETR(nn.Module):
     """ This is the DETR module that performs object detection """
-    def __init__(self, backbone, transformer, num_classes, num_queries, aux_loss=False):
+    def __init__(self, backbone, transformer, num_classes, num_queries, aux_loss=False, cc_tr=False):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -40,6 +40,7 @@ class DETR(nn.Module):
         self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
         self.backbone = backbone
         self.aux_loss = aux_loss
+        self.cc_tr = cc_tr
 
     def forward(self, samples: NestedTensor):
         """ The forward expects a NestedTensor, which consists of:
@@ -307,6 +308,8 @@ def build(args):
         num_classes = 250
     if args.dataset_file == 'kitti_2d':
         num_classes = 4
+    if args.dataset_file == 'voc':
+        num_classes = 21
     device = torch.device(args.device)
 
     backbone = build_backbone(args)
@@ -319,6 +322,7 @@ def build(args):
         num_classes=num_classes,
         num_queries=args.num_queries,
         aux_loss=args.aux_loss,
+        cc_tr=args.cc_tr,
     )
     if args.masks:
         model = DETRsegm(model, freeze_detr=(args.frozen_weights is not None))

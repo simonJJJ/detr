@@ -188,6 +188,32 @@ class RandomHorizontalFlip(object):
         return img, target
 
 
+class Resize(object):
+    """
+    Resize the image to target size
+    """
+    def __init__(self, target_shape):
+        self.h_target, self.w_target = target_shape
+
+    def __call__(self, img, target):
+        w, h = img.size
+        resize_ratio = min(
+            1.0 * self.w_target / w, 1.0 * self.h_target / h
+        )
+        resize_w = int(resize_ratio * w)
+        resize_h = int(resize_ratio * h)
+        resized_img = F.resize(img, (resize_h, resize_w))
+
+        if "boxes" in target:
+            boxes = target["boxes"]
+            scaled_boxes = boxes * torch.as_tensor([resize_ratio])
+            target["boxes"] = scaled_boxes
+
+        target["size"] = torch.tensor([resize_h, resize_w])
+
+        return resized_img, target
+
+
 class RandomResize(object):
     def __init__(self, sizes, max_size=None):
         assert isinstance(sizes, (list, tuple))
