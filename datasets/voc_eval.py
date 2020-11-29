@@ -40,6 +40,8 @@ class VocEvaluator(object):
         self.img_ids = []
         self.dt_annos = []
         self.gt_annos = []
+        self.voc_eval = {}
+        self.aps = defaultdict(list)
 
     def update(self, predictions, targets):
         img_ids = list(np.unique(list(predictions.keys())))
@@ -78,18 +80,25 @@ class VocEvaluator(object):
         self.gt_annos = list(merged_gt_annos)
 
     def accumulate(self):
-        prec, rec = self.calc_detection_voc_pred_rec(self.gt_annos, self.dt_annos)
-        self.aps = self.calc_detection_voc_ap(prec, rec, use_07_metric=False)
+        for thresh in range(50, 100, 5):
+            prec, rec = self.calc_detection_voc_pred_rec(
+                self.gt_annos,
+                self.dt_annos,
+                iou_thresh=thresh / 100.0)
+            aps = self.calc_detection_voc_ap(prec, rec, use_07_metric=False)
+            self.aps[thresh].append(aps[1:] * 100)
 
     def summarize(self):
-        print('Mean AP = {:.4f}'.format(np.mean(self.aps[1:])))
+        mAP = {iou: np.mean(x) for iou, x in self.aps.items()}
+        self.voc_eval["mAp"] = np.mean(list(mAP.values()))
+        self.voc_eval["AP50"] = mAP[50]
+        self.voc_eval["AP75"] = mAP[75]
         print('~~~~~~~~')
         print('Results:')
-        for i, ap in enumerate(self.aps[1:]):
-            print('{:}, {:.3f}'.format(type(self).CLASSES[i + 1], ap))
-        print('{:.3f}'.format(np.mean(self.aps[1:])))
+        print('Mean AP = {:.4f}'.format(self.voc_eval["mAp"]))
+        print('AP50 = {:.4f}'.format(self.voc_eval["AP50"]))
+        print('AP75 = {:.4f}'.format(self.voc_eval["AP75"]))
         print('~~~~~~~~')
-        print('')
         print('--------------------------------------------------------------')
 
     def calc_detection_voc_pred_rec(self, gt_annos, dt_annos, iou_thresh=0.5):
