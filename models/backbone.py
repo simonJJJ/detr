@@ -116,4 +116,5 @@ def build_backbone(args):
     backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
     model = Joiner(backbone, position_embedding)
     model.num_channels = backbone.num_channels
+    args.backbone_out_channels = model.num_channels
     return model

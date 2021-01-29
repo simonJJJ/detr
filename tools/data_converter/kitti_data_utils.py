@@ -191,7 +191,7 @@ def get_kitti_image_info(path,
                 label_path = str(root_path / label_path)
             annotations = get_label_anno(label_path)
         info['image'] = image_info
-        info['point_clout'] = pc_info
+        info['point_cloud'] = pc_info
         if calib:
             calib_path = get_calib_path(
                 idx, path, training, relative_path=False)

@@ -52,54 +52,102 @@ ca_map = _CAMap.apply
 class CrissCrossAttention(nn.Module):
     """Criss-Cross Attention Module"""
 
-    def __init__(self, in_channels, bias=True):
+    def __init__(self, in_channels, num_heads=8, bias=True):
         super(CrissCrossAttention, self).__init__()
-        self.query_conv = nn.Conv2d(in_channels, in_channels // 8, 1, bias=bias)
-        self.key_conv = nn.Conv2d(in_channels, in_channels // 8, 1, bias=bias)
+        self.query_conv = nn.Conv2d(in_channels, in_channels, 1, bias=bias)
+        self.key_conv = nn.Conv2d(in_channels, in_channels, 1, bias=bias)
         self.value_conv = nn.Conv2d(in_channels, in_channels, 1, bias=bias)
         self.gamma = nn.Parameter(torch.zeros(1))
+        self.num_heads = num_heads
 
     def forward(self, x):
         proj_query = self.query_conv(x)
         proj_key = self.key_conv(x)
         proj_value = self.value_conv(x)
+        """ Multi-head CC """
+        bsz, embed_dim, h, w = proj_query.size()
+        head_dim = embed_dim // self.num_heads
+        assert head_dim * self.num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+        proj_query = proj_query.contiguous().view(bsz * self.num_heads, head_dim, h, w)
+        proj_key = proj_key.contiguous().view(bsz * self.num_heads, head_dim, h, w)
+        proj_value = proj_value.contiguous().view(bsz * self.num_heads, head_dim, h, w)
 
         energy = ca_weight(proj_query, proj_key)
         attention = F.softmax(energy, 1)
         out = ca_map(attention, proj_value)
+        out = out.contiguous().view(bsz, embed_dim, h, w)
         out = self.gamma * out + x
 
         return out
 
 
-class RCCAModule(nn.Module):
-    def __init__(self, in_channels, norm_layer=nn.BatchNorm2d, recurrence=2):
-        super(RCCAModule, self).__init__()
-        self.recurrence = recurrence
-        inter_channels = in_channels // 4
-        self.conva = nn.Sequential(
-            nn.Conv2d(in_channels, inter_channels, 3, padding=1, bias=False),
-            #norm_layer(inter_channels),
-            nn.ReLU(True))
-        self.cca = CrissCrossAttention(inter_channels)
-        self.convb = nn.Sequential(
-            nn.Conv2d(inter_channels, in_channels, 3, padding=1, bias=False),
-            #norm_layer(in_channels),
-            nn.ReLU(True))
+class CrissCrossAttentionDecoder(nn.Module):
+    """Criss-Cross Attention Decoder Module"""
 
-    def forward(self, x):
-        out = self.conva(x)
-        for i in range(self.recurrence):
-            out = self.cca(out)
-        out = self.convb(out)
+    def __init__(self, in_channels):
+        super(CrissCrossAttentionDecoder, self).__init__()
+        self.query_conv = nn.Conv2d(in_channels, in_channels // 8, 1)
+        self.key_conv = nn.Conv2d(in_channels, in_channels // 8, 1)
+        self.value_conv = nn.Conv2d(in_channels, in_channels, 1)
+        self.scaling = float(in_channels // 8) ** -0.5
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, query, memory):
+        proj_query = self.query_conv(query)
+        proj_key = self.key_conv(memory)
+        proj_value = self.value_conv(memory)
+        proj_query = proj_query * self.scaling
+
+        energy = ca_weight(proj_query, proj_key)
+        attention = F.softmax(energy, 1)
+        out = ca_map(attention, proj_value)
+        out = self.gamma * out + memory
 
         return out
 
-#class MultiHeadCCAttention(nn.Module):
-    """Multi Head Criss-Cross Attention Module"""
 
-    """def __init__(self, in_channels, num_heads, bias=True):
-        super(MultiHeadCCAttention, self).__init__()
-        self.query_conv = nn.Conv2d(in_channels, in_channels, 1, bias=bias)
-        self.key_conv = nn.Conv2d(in_channels, in_channels, 1, bias=True)
-        self.value_conv = nn.Conv2d(in_channels, in_channels, 1, bias=bias)"""
+class RCCAModule(nn.Module):
+    def __init__(self, in_channels, recurrence=2):
+        super(RCCAModule, self).__init__()
+        self.recurrence = recurrence
+        self.cca = CrissCrossAttention(in_channels)
+
+        self.bottleneck = nn.Sequential(
+        #    norm_layer(in_channels),
+            nn.Conv2d(in_channels * 2, in_channels, 3, padding=1, bias=True),
+            nn.ReLU(True),
+        #    nn.Dropout2d(0.1),
+        )
+        #self.norm1 = norm_layer(32, inter_channels)
+        #self.norm2 = norm_layer(32, inter_channels)
+        #self.dropout1 = nn.Dropout2d(0.1)
+        #self.dropout2 = nn.Dropout2d(0.1)
+
+    def forward(self, x):
+        out = x.clone()
+        for i in range(self.recurrence):
+            out = self.cca(out)
+        #out = self.norm1(out)
+        #out = self.convb(self.conva(out))
+        #out = self.convb(out)
+        #out = out + out2
+        #out = self.norm2(out)
+        out = torch.cat([x, out], dim=1)
+        out = self.bottleneck(out)
+
+        return out
+
+
+class RCCAModuleNormal(nn.Module):
+    def __init__(self, in_channels, recurrence=2):
+        super(RCCAModuleNormal, self).__init__()
+        self.recurrence = recurrence
+        self.cca = CrissCrossAttentionDecoder(in_channels)
+
+        self.out_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+
+    def forward(self, query, memory):
+        memory = self.cca(query, memory)
+        memory = self.cca(query, memory)
+        out = self.out_conv(memory)
+        return out

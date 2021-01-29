@@ -22,6 +22,8 @@ def get_args_parser():
     parser.add_argument('--lr', default=1e-4, type=float)
     parser.add_argument('--lr_backbone', default=1e-5, type=float)
     parser.add_argument('--lr_ft', default=1e-5, type=float)
+    parser.add_argument('--lr_ccdecode', default=1e-5, type=float)
+    parser.add_argument('--lr_grida', default=1e-5, type=float)
     parser.add_argument('--batch_size', default=2, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=300, type=int)
@@ -57,6 +59,13 @@ def get_args_parser():
                         help="Number of query slots")
     parser.add_argument('--pre_norm', action='store_true')
     parser.add_argument('--cc_tr', action='store_true')
+    parser.add_argument('--cg_tr', action='store_true')
+    parser.add_argument('--naive_tr', action='store_true')
+    parser.add_argument('--ccpool_tr', action='store_true')
+    parser.add_argument('--detrpool_tr', action='store_true')
+    parser.add_argument('--ccg_tr', action='store_true')
+    parser.add_argument('--detrg_tr', action='store_true')
+    parser.add_argument('--ga_align_tr', action='store_true')
 
     # * Segmentation
     parser.add_argument('--masks', action='store_true',
@@ -137,13 +146,13 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
     if args.ft_kitti or args.ft_voc:
-        if args.cc_tr:
+        if args.cc_tr or args.cg_tr or args.naive_tr or args.ccpool_tr or args.detrpool_tr or args.ccg_tr or args.detrg_tr or args.ga_align_tr:
             param_dicts = [
                 {
                     "params": [p for n, p in model_without_ddp.named_parameters() if "encoder" in n and p.requires_grad],
@@ -167,13 +176,44 @@ def main(args):
                 },
             ]
     else:
-        param_dicts = [
-            {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},
-            {
-                "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" in n and p.requires_grad],
-                "lr": args.lr_backbone,
-            },
-        ]
+        if args.ccpool_tr:
+            param_dicts = [
+                {
+                    "params": [p for n, p in model_without_ddp.named_parameters() if ("backbone" not in n and "decoder" not in n and "rcca" not in n) and p.requires_grad],
+                    "lr": args.lr,
+                },
+                {
+                    "params": [p for n, p in model_without_ddp.named_parameters() if ("decoder" in n and "rcca" in n) and p.requires_grad],
+                    "lr": args.lr_ccdecode,
+                },
+                {
+                    "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" in n and p.requires_grad],
+                    "lr": args.lr_backbone,
+                },
+            ]
+        elif args.detrg_tr:
+            param_dicts = [
+                {
+                    "params": [p for n, p in model_without_ddp.named_parameters() if ("backbone" not in n and "decoder" not in n and "grida" not in n) and p.requires_grad],
+                    "lr": args.lr,
+                },
+                {
+                    "params": [p for n, p in model_without_ddp.named_parameters() if ("decoder" in n and "grida" in n) and p.requires_grad],
+                    "lr": args.lr_grida,
+                },
+                {
+                    "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" in n and p.requires_grad],
+                    "lr": args.lr_backbone,
+                },
+            ]
+        else:
+            param_dicts = [
+                {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},
+                {
+                    "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" in n and p.requires_grad],
+                    "lr": args.lr_backbone,
+                },
+            ]
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
                                   weight_decay=args.weight_decay)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
@@ -192,9 +232,11 @@ def main(args):
         sampler_train, args.batch_size, drop_last=True)
 
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
+                                   collate_fn=utils.collate_fn, num_workers=args.num_workers,
+                                   pin_memory=True)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
-                                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+                                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers,
+                                 pin_memory=True)
 
     if args.dataset_file == "coco_panoptic":
         # We also evaluate AP during panoptic training, on original coco DS
@@ -216,7 +258,7 @@ def main(args):
             checkpoint = torch.load(args.resume, map_location='cpu')
         if args.ft_kitti or args.ft_voc:
             module_dict = model_without_ddp.state_dict()
-            if args.cc_tr:
+            if args.cc_tr or args.cg_tr or args.naive_tr or args.ccpool_tr or args.detrpool_tr or args.ccg_tr or args.detrg_tr or args.ga_align_tr:
                 update_state_dict = {key: value for key, value in checkpoint['model'].items() if "class_embed" not in key and "encoder" not in key}
             else:
                 update_state_dict = {key: value for key, value in checkpoint['model'].items() if "class_embed" not in key}
@@ -278,15 +320,24 @@ def main(args):
                 f.write(json.dumps(log_stats) + "\n")
 
             # for evaluation logs
-            if coco_evaluator is not None:
-                (output_dir / 'eval').mkdir(exist_ok=True)
-                if "bbox" in coco_evaluator.coco_eval:
+            if args.dataset_file == "coco":
+                if coco_evaluator is not None:
+                    (output_dir / 'eval').mkdir(exist_ok=True)
+                    if "bbox" in coco_evaluator.coco_eval:
+                        filenames = ['latest.pth']
+                        if epoch % 50 == 0:
+                            filenames.append(f'{epoch:03}.pth')
+                        for name in filenames:
+                            torch.save(coco_evaluator.coco_eval["bbox"].eval,
+                                    output_dir / "eval" / name)
+            elif args.dataset_file == "voc":
+                if voc_evaluator is not None:
+                    (output_dir / 'eval').mkdir(exist_ok=True)
                     filenames = ['latest.pth']
                     if epoch % 50 == 0:
                         filenames.append(f'{epoch:03}.pth')
                     for name in filenames:
-                        torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                   output_dir / "eval" / name)
+                        torch.save(voc_evaluator, output_dir / "eval" / name)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

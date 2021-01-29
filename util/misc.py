@@ -285,16 +285,21 @@ class NestedTensor(object):
         self.tensors = tensors
         self.mask = mask
 
-    def to(self, device):
+    def to(self, device, non_blocking=False):
         # type: (Device) -> NestedTensor # noqa
-        cast_tensor = self.tensors.to(device)
+        cast_tensor = self.tensors.to(device, non_blocking=non_blocking)
         mask = self.mask
         if mask is not None:
             assert mask is not None
-            cast_mask = mask.to(device)
+            cast_mask = mask.to(device, non_blocking=non_blocking)
         else:
             cast_mask = None
         return NestedTensor(cast_tensor, cast_mask)
+
+    def record_stream(self, *args, **kwargs):
+        self.tensors.record_stream(*args, **kwargs)
+        if self.mask is not None:
+            self.mask.record_stream(*args, **kwargs)
 
     def decompose(self):
         return self.tensors, self.mask
@@ -465,3 +470,19 @@ def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corne
         return _new_empty_tensor(input, output_shape)
     else:
         return torchvision.ops.misc.interpolate(input, size, scale_factor, mode, align_corners)
+
+
+def get_total_grad_norm(parameters, norm_type=2):
+    parameters = list(filter(lambda p: p.grad is not None, parameters))
+    norm_type = float(norm_type)
+    device = parameters[0].grad.device
+    total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), norm_type).to(device) for p in parameters]),
+                            norm_type)
+    return total_norm
+
+
+def inverse_sigmoid(x, eps=1e-5):
+    x = x.clamp(min=0, max=1)
+    x1 = x.clamp(min=eps)
+    x2 = (1 - x).clamp(min=eps)
+    return torch.log(x1 / x2)
