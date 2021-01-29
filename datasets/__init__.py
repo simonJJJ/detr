@@ -25,5 +25,8 @@ def build_dataset(image_set, args):
     if args.dataset_file == 'kitti_2d':
         from .kitti_2d import build as build_kitti
         return build_kitti(image_set, args)
+    if args.dataset_file == "voc":
+        from .voc import build as build_voc
+        return build_voc(image_set, args)
 
     raise ValueError(f'dataset {args.dataset_file} not supported')

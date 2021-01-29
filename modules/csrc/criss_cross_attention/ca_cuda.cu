@@ -325,4 +325,4 @@ std::tuple<at::Tensor, at::Tensor> ca_map_backward_cuda(const at::Tensor& dout, 
     return std::make_tuple(dw, dg);
 }
 
-} // namespace detr
+}  // namespace detr

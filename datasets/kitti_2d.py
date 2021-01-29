@@ -8,10 +8,14 @@ import torchvision
 import os
 import numpy as np
 from PIL import Image
+from random import shuffle
 import time
 import io
 
 import datasets.transforms as T
+from nvidia.dali.pipeline import Pipeline
+import nvidia.dali.ops as ops
+import nvidia.dali.types as types
 
 
 class KITTI2D(torchvision.datasets.VisionDataset):
@@ -132,6 +136,113 @@ class KITTI2D(torchvision.datasets.VisionDataset):
         return value_buf
 
 
+class KITTI2DInputIterator(object):
+    def __init__(self, batch_size, image_folder, ann_folder, index_file):
+        self.batch_size = batch_size
+        self.image_folder = image_folder
+        self.ann_folder = ann_folder
+        self.class_names = ["Car", "Pedestrian", "Cyclist"]
+        self.sample_ids = self._read_imageset_file(index_file)
+        shuffle(self.sample_ids)
+        self.anns = []
+        self.load_anns()
+
+    def __iter__(self):
+        self.i = 0
+        self.n = len(self.anns)
+        return self
+
+    def __next__(self):
+        batch = []
+        labels = []
+        count = 0
+        while True:
+            target = self.prepare(self.i)
+            if target is None:
+                continue
+            labels.append(target)
+            sample_id = self.sample_ids[self.i]
+            img_filename = os.path.join(self.root, '%06d.png' % sample_id)
+            f = open(img_filename, 'rb')
+            batch.append(np.frombuffer(f.read(), dtype=np.uint8))
+            self.i = (self.i + 1) % self.n
+            count += 1
+            if count == self.batch_size:
+                break
+        return (batch, labels)
+
+    @staticmethod
+    def _read_imageset_file(path):
+        with open(path, 'r') as f:
+            lines = f.readlines()
+        return [int(line) for line in lines]
+
+    def load_anns(self):
+        print('loading kitti annotations into memory...')
+        tic = time.time()
+        for idx in self.sample_ids:
+            data_list = [line.rstrip().split(" ") for line in open(os.path.join(self.ann_folder, '%06d.txt' % idx))]
+            for data in data_list:
+                data[1:] = list(map(float, data[1:]))
+            self.anns.append(data_list)
+        print('Done (t={:0.2f}s'.format(time.time() - tic))
+
+    def prepare(self, idx):
+        data_list = self.anns[idx]
+        boxes = [data[4:8] for data in data_list if data[0] not in ["DontCare"]]
+        classes = [data[0] for data in data_list if data[0] not in ["DontCare"]]
+        assert len(classes) == len(boxes)
+
+        boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+
+        classes = ['Car' if n == 'Van' else n for n in classes]
+        classes = np.array(classes)
+        selected = [i for i in range(len(classes)) if classes[i] in self.class_names]
+        boxes = boxes[selected, :]
+        classes = classes[selected]
+        classes = torch.tensor([self.class_names.index(n) + 1 for n in classes], dtype=torch.int64)
+
+        keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
+        boxes = boxes[keep]
+        classes = classes[keep]
+        assert len(classes) == len(boxes)
+        if len(classes) == len(boxes) == 0:
+            return None
+
+        target = {}
+        target["image_id"] = torch.tensor([self.sample_ids[idx]])
+        target["truncated"] = torch.tensor([data[1] for data in data_list])
+        target["occluded"] = torch.tensor([int(data[2]) for data in data_list])
+        target["boxes"] = boxes
+        target["labels"] = classes
+        target["orig_size"] = torch.as_tensor([int(h), int(w)])
+        target["size"] = torch.as_tensor([int(h), int(w)])
+
+        return target
+
+
+class KITTI2DPipeline(Pipeline):
+    def __init__(self, default_boxes, args, seed):
+        super(KITTI2DPipeline, self).__init__(
+            batch_size=args.batch_size,
+            device_id=args.local_rank,
+            num_threads=args.num_workers,
+            seed=seed)
+
+        try:
+            shard_id = torch.distributed.get_rank()
+            num_shards = torch.distributed.get_world_size()
+        except RuntimeError:
+            shard_id = 0
+            num_shards = 1
+
+        self.flip = ops.Flip(device="cpu")
+        self.bbflip = ops.BbFlip(device="cpu", ltrb=True)
+        self.flip_coin = ops.CoinFlip(probability=0.5)
+
+    def define_graph(self):
+        coin_rnd = self.flip_coin()
+
 
 def make_kitti_transforms(image_set):
 
@@ -145,14 +256,14 @@ def make_kitti_transforms(image_set):
             T.RandomHorizontalFlip(),
             normalize,
         ])
-
-    if image_set == 'val':
+    elif image_set == 'val':
         return normalize
 
     raise ValueError(f'unknwon {image_set}')
 
 
 def build(image_set, args):
+    assert image_set in ["train", "val"]
     root = Path(args.kitti_path)
     assert root.exists(), f'provided KITTI path {root} does not exit'
     PATHS = {
