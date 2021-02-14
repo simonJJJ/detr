@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torch.nn.init import xavier_uniform_, constant_
 from torch.autograd.function import once_differentiable
 from ops import _C
 
@@ -57,13 +58,24 @@ class CrissCrossAttention(nn.Module):
         self.query_conv = nn.Conv2d(in_channels, in_channels, 1, bias=bias)
         self.key_conv = nn.Conv2d(in_channels, in_channels, 1, bias=bias)
         self.value_conv = nn.Conv2d(in_channels, in_channels, 1, bias=bias)
+        self.scaling = float(in_channels // 8) ** -0.5
         self.gamma = nn.Parameter(torch.zeros(1))
         self.num_heads = num_heads
 
-    def forward(self, x):
-        proj_query = self.query_conv(x)
-        proj_key = self.key_conv(x)
-        proj_value = self.value_conv(x)
+        xavier_uniform_(self.query_conv.weight.data)
+        constant_(self.query_conv.bias.data, 0.)
+        xavier_uniform_(self.key_conv.weight.data)
+        constant_(self.key_conv.bias.data, 0.)
+        xavier_uniform_(self.value_conv.weight.data)
+        constant_(self.value_conv.bias.data, 0.)
+
+    def forward(self, q, v, padding_mask=None):
+        proj_query = self.query_conv(q)
+        proj_key = self.key_conv(q)
+        proj_value = self.value_conv(v)
+        if padding_mask is not None:
+            proj_value = proj_value.masked_fill(padding_mask[:, None], float(0))
+        proj_query = proj_query * self.scaling
         """ Multi-head CC """
         bsz, embed_dim, h, w = proj_query.size()
         head_dim = embed_dim // self.num_heads
@@ -72,11 +84,11 @@ class CrissCrossAttention(nn.Module):
         proj_key = proj_key.contiguous().view(bsz * self.num_heads, head_dim, h, w)
         proj_value = proj_value.contiguous().view(bsz * self.num_heads, head_dim, h, w)
 
-        energy = ca_weight(proj_query, proj_key)
-        attention = F.softmax(energy, 1)
+        attn_weight = ca_weight(proj_query, proj_key)
+        attention = F.softmax(attn_weight, 1)
         out = ca_map(attention, proj_value)
         out = out.contiguous().view(bsz, embed_dim, h, w)
-        out = self.gamma * out + x
+        out = self.gamma * out + v
 
         return out
 
@@ -111,29 +123,17 @@ class RCCAModule(nn.Module):
         super(RCCAModule, self).__init__()
         self.recurrence = recurrence
         self.cca = CrissCrossAttention(in_channels)
+        self.out_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1)
 
-        self.bottleneck = nn.Sequential(
-        #    norm_layer(in_channels),
-            nn.Conv2d(in_channels * 2, in_channels, 3, padding=1, bias=True),
-            nn.ReLU(True),
-        #    nn.Dropout2d(0.1),
-        )
-        #self.norm1 = norm_layer(32, inter_channels)
-        #self.norm2 = norm_layer(32, inter_channels)
-        #self.dropout1 = nn.Dropout2d(0.1)
-        #self.dropout2 = nn.Dropout2d(0.1)
+        xavier_uniform_(self.out_conv.weight.data)
+        constant_(self.out_conv.bias.data, 0.)
 
-    def forward(self, x):
-        out = x.clone()
+    def forward(self, query, value, pos, padding_mask):
+        out = value
         for i in range(self.recurrence):
-            out = self.cca(out)
-        #out = self.norm1(out)
-        #out = self.convb(self.conva(out))
-        #out = self.convb(out)
-        #out = out + out2
-        #out = self.norm2(out)
-        out = torch.cat([x, out], dim=1)
-        out = self.bottleneck(out)
+            out = self.cca(query, out, padding_mask)
+            query = out + pos
+        out = self.out_conv(out)
 
         return out
 

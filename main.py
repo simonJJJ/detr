@@ -81,7 +81,7 @@ def get_args_parser():
     parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
                         help="Disables auxiliary decoding losses (loss at each layer)")
     # * Matcher
-    parser.add_argument('--set_cost_class', default=1, type=float,
+    parser.add_argument('--set_cost_class', default=2, type=float,
                         help="Class coefficient in the matching cost")
     parser.add_argument('--set_cost_bbox', default=5, type=float,
                         help="L1 box coefficient in the matching cost")
