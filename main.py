@@ -21,6 +21,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
     parser.add_argument('--lr_backbone', default=1e-5, type=float)
+    parser.add_argument('--lr_linear_proj_names', default=['reference_points', 'sampling_offsets'], type=str, nargs='+')
     parser.add_argument('--lr_ft', default=1e-5, type=float)
     parser.add_argument('--lr_ccdecode', default=1e-5, type=float)
     parser.add_argument('--lr_grida', default=1e-5, type=float)
@@ -151,6 +152,14 @@ def main(args):
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
+    def match_name_keywords(n, name_keywords):
+        out = False
+        for b in name_keywords:
+            if b in n:
+                out = True
+                break
+        return out
+
     if args.ft_kitti or args.ft_voc:
         if args.cc_tr or args.cg_tr or args.naive_tr or args.ccpool_tr or args.detrpool_tr or args.ccg_tr or args.detrg_tr or args.ga_align_tr:
             param_dicts = [
@@ -208,11 +217,16 @@ def main(args):
             ]
         else:
             param_dicts = [
-                {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},
+                {"params": [p for n, p in model_without_ddp.named_parameters()
+                            if "backbone" not in n and not match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad]},
                 {
                     "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" in n and p.requires_grad],
                     "lr": args.lr_backbone,
                 },
+                {
+                    "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+                    "lr": args.lr * 0.1,
+        }
             ]
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
                                   weight_decay=args.weight_decay)

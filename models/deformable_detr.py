@@ -16,10 +16,10 @@ from .backbone import build_backbone
 from .matcher import build_matcher
 from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
                            dice_loss, sigmoid_focal_loss)
-from .ccgrid_transformer import build_transformer
+from .deformable_transformer import build_transformer
 
 
-class CGDETR(nn.Module):
+class DeformableDETR(nn.Module):
     """ This is the DETR module that performs object detection """
     def __init__(self, backbone, transformer, num_classes, num_queries, aux_loss=False, cc_tr=False):
         """ Initializes the model.
@@ -60,19 +60,6 @@ class CGDETR(nn.Module):
         self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
         self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(num_pred)])
 
-    def get_reference_points(self, src_shapes, device):
-        B, C, H, W = src_shapes
-        bin_size_h = H / 10
-        bin_size_w = W / 10
-        ref_y, ref_x = torch.meshgrid(torch.linspace(bin_size_h / 2, H - bin_size_h / 2, 10, dtype=torch.float32, device=device),
-                                      torch.linspace(bin_size_w / 2, W - bin_size_w / 2, 10, dtype=torch.float32, device=device))
-        #ref_y = ref_y.reshape(-1)[None, :, None].expand(B, -1, 4).flatten(1) / H  # (B, 10*10)
-        #ref_x = ref_x.reshape(-1)[None, :, None].expand(B, -1, 4).flatten(1) / W  # (B, 10*10)
-        ref_y = ref_y.reshape(-1)[None].expand(B, -1) / H  # (B, 10*10)
-        ref_x = ref_x.reshape(-1)[None].expand(B, -1) / W  # (B, 10*10)
-        ref = torch.stack((ref_x, ref_y), -1)  # (B, 10*10, 2)
-        return ref
-
     def forward(self, samples: NestedTensor):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
@@ -94,23 +81,24 @@ class CGDETR(nn.Module):
 
         src, mask = features[-1].decompose()
         assert mask is not None
-        hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])  # [6, b, num_queries, d_model]
-        ref_coord = self.get_reference_points(src.shape, src.device)  # (B, 10*10, 2)
-        ref_coord = inverse_sigmoid(ref_coord)
+        hs, init_reference, inter_references = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])  # [6, b, num_queries, d_model]
 
         outputs_classes = []
         outputs_coords = []
         for lvl in range(hs.shape[0]):
+            if lvl == 0:
+                reference = init_reference
+            else:
+                reference = inter_references[lvl - 1]
+            reference = inverse_sigmoid(reference)
             outputs_class = self.class_embed[lvl](hs[lvl])
             tmp = self.bbox_embed[lvl](hs[lvl])
-            tmp[..., :2] += ref_coord
+            tmp[..., :2] += reference
             outputs_coord = tmp.sigmoid()
             outputs_classes.append(outputs_class)
             outputs_coords.append(outputs_coord)
-        outputs_class = torch.stack(outputs_classes)
+        outputs_class = torch.stack(outputs_classes)  # (b, num_queries, 91)
         outputs_coord = torch.stack(outputs_coords)
-        #outputs_class = self.class_embed(hs)
-        #outputs_coord = self.bbox_embed(hs).sigmoid()
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
@@ -156,19 +144,19 @@ class SetCriterion(nn.Module):
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
         assert 'pred_logits' in outputs
-        src_logits = outputs['pred_logits']
+        src_logits = outputs['pred_logits']  # (b, num_queries, num_classes)
 
         idx = self._get_src_permutation_idx(indices)
-        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])  # (sigma num_gt_i)
         target_classes = torch.full(src_logits.shape[:2], self.num_classes,
-                                    dtype=torch.int64, device=src_logits.device)
+                                    dtype=torch.int64, device=src_logits.device)  # (b, num_queries)
         target_classes[idx] = target_classes_o
 
         target_classes_onehot = torch.zeros([src_logits.shape[0], src_logits.shape[1], src_logits.shape[2] + 1],
-                                            dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
-        target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
+                                            dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)  # (b, num_queries, num_classes + 1)
+        target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)  # (b, num_queries, num_classes + 1)
 
-        target_classes_onehot = target_classes_onehot[:,:,:-1]
+        target_classes_onehot = target_classes_onehot[:,:,:-1]  # (b, num_queries, num_classes)
         loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
         losses = {'loss_ce': loss_ce}
 
@@ -185,9 +173,9 @@ class SetCriterion(nn.Module):
         """ Compute the cardinality error, ie the absolute error in the number of predicted non-empty boxes
         This is not really a loss, it is intended for logging purposes only. It doesn't propagate gradients
         """
-        pred_logits = outputs['pred_logits']
+        pred_logits = outputs['pred_logits']  # (b, num_queries, num_classes)
         device = pred_logits.device
-        tgt_lengths = torch.as_tensor([len(v["labels"]) for v in targets], device=device)
+        tgt_lengths = torch.as_tensor([len(v["labels"]) for v in targets], device=device)  # (b, )
         # Count the number of predictions that are NOT "no-object" (which is the last class)
         card_pred = (pred_logits.argmax(-1) != 0).sum(1)
         card_err = F.l1_loss(card_pred.float(), tgt_lengths.float())
@@ -201,8 +189,8 @@ class SetCriterion(nn.Module):
         """
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
-        src_boxes = outputs['pred_boxes'][idx]
-        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        src_boxes = outputs['pred_boxes'][idx]  # (sigma num_gt_i, 4)
+        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)  # (sigma num_gt_i, 4)
 
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
 
@@ -276,7 +264,7 @@ class SetCriterion(nn.Module):
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
         # Retrieve the matching between the outputs of the last layer and the targets
-        indices = self.matcher(outputs_without_aux, targets)
+        indices = self.matcher(outputs_without_aux, targets)  # list of tuple of tensor
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
@@ -301,7 +289,7 @@ class SetCriterion(nn.Module):
                     kwargs = {}
                     if loss == 'labels':
                         # Logging is enabled only for the last layer
-                        kwargs = {'log': False}
+                        kwargs['log'] = False
                     l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
                     l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
@@ -328,7 +316,7 @@ class PostProcess(nn.Module):
         #prob = F.softmax(out_logits, -1)
         #scores, labels = prob[..., :-1].max(-1)
 
-        prob = out_logits.sigmoid()
+        prob = out_logits.sigmoid()  # (b, num_queries, num_classes)
         topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)
         scores = topk_values
         topk_boxes = topk_indexes // out_logits.shape[2]
@@ -377,7 +365,7 @@ def build(args):
 
     transformer = build_transformer(args)
 
-    model = CGDETR(
+    model = DeformableDETR(
         backbone,
         transformer,
         num_classes=num_classes,

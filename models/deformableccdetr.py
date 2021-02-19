@@ -16,10 +16,10 @@ from .backbone import build_backbone
 from .matcher import build_matcher
 from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
                            dice_loss, sigmoid_focal_loss)
-from .ccgrid_transformer import build_transformer
+from .ccdeformable_transformer import build_transformer
 
 
-class CGDETR(nn.Module):
+class DeformableCCDETR(nn.Module):
     """ This is the DETR module that performs object detection """
     def __init__(self, backbone, transformer, num_classes, num_queries, aux_loss=False, cc_tr=False):
         """ Initializes the model.
@@ -60,19 +60,6 @@ class CGDETR(nn.Module):
         self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
         self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(num_pred)])
 
-    def get_reference_points(self, src_shapes, device):
-        B, C, H, W = src_shapes
-        bin_size_h = H / 10
-        bin_size_w = W / 10
-        ref_y, ref_x = torch.meshgrid(torch.linspace(bin_size_h / 2, H - bin_size_h / 2, 10, dtype=torch.float32, device=device),
-                                      torch.linspace(bin_size_w / 2, W - bin_size_w / 2, 10, dtype=torch.float32, device=device))
-        #ref_y = ref_y.reshape(-1)[None, :, None].expand(B, -1, 4).flatten(1) / H  # (B, 10*10)
-        #ref_x = ref_x.reshape(-1)[None, :, None].expand(B, -1, 4).flatten(1) / W  # (B, 10*10)
-        ref_y = ref_y.reshape(-1)[None].expand(B, -1) / H  # (B, 10*10)
-        ref_x = ref_x.reshape(-1)[None].expand(B, -1) / W  # (B, 10*10)
-        ref = torch.stack((ref_x, ref_y), -1)  # (B, 10*10, 2)
-        return ref
-
     def forward(self, samples: NestedTensor):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
@@ -94,23 +81,24 @@ class CGDETR(nn.Module):
 
         src, mask = features[-1].decompose()
         assert mask is not None
-        hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])  # [6, b, num_queries, d_model]
-        ref_coord = self.get_reference_points(src.shape, src.device)  # (B, 10*10, 2)
-        ref_coord = inverse_sigmoid(ref_coord)
+        hs, init_reference, inter_references = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])  # [6, b, num_queries, d_model]
 
         outputs_classes = []
         outputs_coords = []
         for lvl in range(hs.shape[0]):
+            if lvl == 0:
+                reference = init_reference
+            else:
+                reference = inter_references[lvl - 1]
+            reference = inverse_sigmoid(reference)
             outputs_class = self.class_embed[lvl](hs[lvl])
             tmp = self.bbox_embed[lvl](hs[lvl])
-            tmp[..., :2] += ref_coord
+            tmp[..., :2] += reference
             outputs_coord = tmp.sigmoid()
             outputs_classes.append(outputs_class)
             outputs_coords.append(outputs_coord)
         outputs_class = torch.stack(outputs_classes)
         outputs_coord = torch.stack(outputs_coords)
-        #outputs_class = self.class_embed(hs)
-        #outputs_coord = self.bbox_embed(hs).sigmoid()
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
@@ -377,7 +365,7 @@ def build(args):
 
     transformer = build_transformer(args)
 
-    model = CGDETR(
+    model = DeformableCCDETR(
         backbone,
         transformer,
         num_classes=num_classes,

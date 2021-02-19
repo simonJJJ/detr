@@ -8,7 +8,7 @@ from modules.grid_attention import GAModule
 from modules.grid_align_attention import GaAlignModule
 
 
-class CCGridTransformer(nn.Module):
+class CCGridCrossTransformer(nn.Module):
     def __init__(self, d_model=256, nhead=8, num_encoder_layers=6,
                  num_decoder_layers=6, dim_feedforward=1024, dropout=0.1,
                  activation="relu", return_intermediate_dec=False):
@@ -16,11 +16,11 @@ class CCGridTransformer(nn.Module):
 
         encoder_layer = CCGridTransformerEncoderLayer(d_model, dim_feedforward,
                                                       dropout, activation, nhead)
-        self.encoder = CCGridTransformerEncoder(encoder_layer, num_encoder_layers)
+        self.encoder = _get_clones(encoder_layer, num_encoder_layers)
 
         decoder_layer = CCGridTransformerDecoderLayer(d_model, dim_feedforward,
                                                       dropout, activation, nhead)
-        self.decoder = CCGridTransformerDecoder(decoder_layer, num_decoder_layers, return_intermediate_dec)
+        self.decoder = _get_clones(decoder_layer, num_decoder_layers)
 
         self.d_model = d_model
         self.nhead = nhead
@@ -33,13 +33,20 @@ class CCGridTransformer(nn.Module):
 
     def forward(self, src, mask, query_embed, pos_embed):
         b, c, h, w = src.shape
-        memory = self.encoder(src, pos_embed, mask)
+        #memory = self.encoder(src, pos_embed, mask)
 
         query_embed, tgt = torch.split(query_embed, c, dim=-1)
         query_embed = query_embed.unsqueeze(0).expand(b, -1, -1)  # (b, num_queries, c)
         tgt = tgt.unsqueeze(0).expand(b, -1, -1)  # (b, num_queries, c)
 
-        hs = self.decoder(tgt, memory, query_embed, mask)
+        #hs = self.decoder(tgt, memory, query_embed, mask)
+
+        intermediate = []
+        for i in range(len(self.encoder)):
+            src = self.encoder[i](src, pos_embed, mask)
+            tgt = self.decoder[i](tgt, query_embed, src, mask)
+            intermediate.append(tgt)
+        hs = torch.stack(intermediate)
         return hs
 
 
@@ -138,10 +145,7 @@ class CCGridTransformerDecoderLayer(nn.Module):
         tgt = self.norm2(tgt)  # (b, num_queries, c)
 
         tgt_reshape = self.with_pos_embed(tgt, query_pos).transpose(1, 2).reshape(bs, self.d_model, 10, 10).contiguous()
-        # (b * 4, c, 5, 5)
-        #tgt_reshape = self.with_pos_embed(tgt, query_pos).transpose(1, 2).reshape(bs, self.d_model, 5, 5, 4).permute(0, 4, 1, 2, 3).flatten(0, 1).contiguous()
         tgt2 = self.cross_attn(tgt_reshape, src, src_padding_mask)
-        #tgt2 = tgt2.reshape(bs, 4, self.d_model, 5, 5).permute(0, 2, 3, 4, 1).flatten(2).transpose(1, 2)
         tgt2 = tgt2.flatten(2).transpose(1, 2)
         tgt = tgt + self.dropout1(tgt2)  # (b, num_queries, c)
         tgt = self.norm1(tgt)
@@ -191,7 +195,7 @@ def _get_activation_fn(activation):
 
 
 def build_transformer(args):
-    return CCGridTransformer(
+    return CCGridCrossTransformer(
         d_model=args.hidden_dim,
         dropout=args.dropout,
         nhead=args.nheads,

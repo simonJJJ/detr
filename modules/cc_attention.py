@@ -59,7 +59,7 @@ class CrissCrossAttention(nn.Module):
         self.key_conv = nn.Conv2d(in_channels, in_channels, 1, bias=bias)
         self.value_conv = nn.Conv2d(in_channels, in_channels, 1, bias=bias)
         self.scaling = float(in_channels // 8) ** -0.5
-        self.gamma = nn.Parameter(torch.zeros(1))
+        #self.gamma = nn.Parameter(torch.zeros(1))
         self.num_heads = num_heads
 
         xavier_uniform_(self.query_conv.weight.data)
@@ -80,15 +80,15 @@ class CrissCrossAttention(nn.Module):
         bsz, embed_dim, h, w = proj_query.size()
         head_dim = embed_dim // self.num_heads
         assert head_dim * self.num_heads == embed_dim, "embed_dim must be divisible by num_heads"
-        proj_query = proj_query.contiguous().view(bsz * self.num_heads, head_dim, h, w)
-        proj_key = proj_key.contiguous().view(bsz * self.num_heads, head_dim, h, w)
-        proj_value = proj_value.contiguous().view(bsz * self.num_heads, head_dim, h, w)
+        proj_query = proj_query.contiguous().reshape(bsz * self.num_heads, head_dim, h, w)
+        proj_key = proj_key.contiguous().reshape(bsz * self.num_heads, head_dim, h, w)
+        proj_value = proj_value.contiguous().reshape(bsz * self.num_heads, head_dim, h, w)
 
         attn_weight = ca_weight(proj_query, proj_key)
         attention = F.softmax(attn_weight, 1)
         out = ca_map(attention, proj_value)
-        out = out.contiguous().view(bsz, embed_dim, h, w)
-        out = self.gamma * out + v
+        out = out.contiguous().reshape(bsz, embed_dim, h, w)
+        #out = self.gamma * out + v
 
         return out
 
@@ -123,6 +123,7 @@ class RCCAModule(nn.Module):
         super(RCCAModule, self).__init__()
         self.recurrence = recurrence
         self.cca = CrissCrossAttention(in_channels)
+        #self.ccb = CrissCrossAttention(in_channels)
         self.out_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1)
 
         xavier_uniform_(self.out_conv.weight.data)
