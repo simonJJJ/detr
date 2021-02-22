@@ -71,7 +71,6 @@ class LocalGridAlignAttention(nn.Module):
         constant_(self.grid_conv.bias.data, 0.)
 
     def forward(self, x, featmap, padding_mask=None):
-        grid_weight = self.grid_conv(x).sigmoid()  # (b, 1, 10, 10)
         proj_query = self.query_conv(x)
         proj_key = self.key_conv(featmap)
         proj_value = self.value_conv(featmap)
@@ -90,9 +89,10 @@ class LocalGridAlignAttention(nn.Module):
         attn_weight = ga_align_weight(proj_query, proj_key)
         attention = F.softmax(attn_weight, 1)
         out = ga_align_map(attention, proj_value)  # (b * 8, c, 10, 10)
-        out = out.contiguous().view(bsz, embed_dim, h, w) * grid_weight
+        out = out.contiguous().view(bsz, embed_dim, h, w)
+        grid_weight = self.grid_conv(out).sigmoid()  # (b, 1, 10, 10)
 
-        return out
+        return out, grid_weight
 
 
 class GaAlignModule(nn.Module):
@@ -105,7 +105,7 @@ class GaAlignModule(nn.Module):
         constant_(self.out_conv.bias.data, 0.)
 
     def forward(self, x, featmap, padding_mask=None):
-        out = self.ga_align(x, featmap, padding_mask)
+        out, grid_weight = self.ga_align(x, featmap, padding_mask)
         out = self.out_conv(out)
 
-        return out
+        return out, grid_weight

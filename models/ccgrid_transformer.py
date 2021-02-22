@@ -35,7 +35,7 @@ class CCGridTransformer(nn.Module):
         b, c, h, w = src.shape
         memory = self.encoder(src, pos_embed, mask)
 
-        query_embed, tgt = torch.split(query_embed, c, dim=-1)
+        query_embed, tgt = torch.split(query_embed, c, dim=1)
         query_embed = query_embed.unsqueeze(0).expand(b, -1, -1)  # (b, num_queries, c)
         tgt = tgt.unsqueeze(0).expand(b, -1, -1)  # (b, num_queries, c)
 
@@ -140,7 +140,7 @@ class CCGridTransformerDecoderLayer(nn.Module):
         tgt_reshape = self.with_pos_embed(tgt, query_pos).transpose(1, 2).reshape(bs, self.d_model, 10, 10).contiguous()
         # (b * 4, c, 5, 5)
         #tgt_reshape = self.with_pos_embed(tgt, query_pos).transpose(1, 2).reshape(bs, self.d_model, 5, 5, 4).permute(0, 4, 1, 2, 3).flatten(0, 1).contiguous()
-        tgt2 = self.cross_attn(tgt_reshape, src, src_padding_mask)
+        tgt2, grid_weight = self.cross_attn(tgt_reshape, src, src_padding_mask)
         #tgt2 = tgt2.reshape(bs, 4, self.d_model, 5, 5).permute(0, 2, 3, 4, 1).flatten(2).transpose(1, 2)
         tgt2 = tgt2.flatten(2).transpose(1, 2)
         tgt = tgt + self.dropout1(tgt2)  # (b, num_queries, c)
@@ -149,7 +149,7 @@ class CCGridTransformerDecoderLayer(nn.Module):
         # ffn
         tgt = self.forward_ffn(tgt)
 
-        return tgt
+        return tgt, grid_weight
 
 
 class CCGridTransformerDecoder(nn.Module):
@@ -163,14 +163,16 @@ class CCGridTransformerDecoder(nn.Module):
         output = tgt
 
         intermediate = []
+        intermediate_grid_weight = []
         for layer in self.layers:
-            output = layer(output, query_pos, src, src_padding_mask)
+            output, grid_weight = layer(output, query_pos, src, src_padding_mask)
 
             if self.return_intermediate:
                 intermediate.append(output)
+                intermediate_grid_weight.append(grid_weight)
 
         if self.return_intermediate:
-            return torch.stack(intermediate)
+            return torch.stack(intermediate), torch.stack(intermediate_grid_weight)
 
         return output.squeeze(0)
 

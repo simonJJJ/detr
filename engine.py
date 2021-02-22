@@ -5,11 +5,15 @@ Train and eval functions used in main.py
 import math
 import os
 import sys
+from tqdm import tqdm
+import numpy as np
 from typing import Iterable
+from PIL import Image
 
 import torch
 
 import util.misc as utils
+from util.visualizer import Visualizer
 from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 from datasets.kitti_eval import KittiEvaluator
@@ -266,3 +270,34 @@ def evaluate_voc(model, criterion, postprocessors, data_loader, device, output_d
     if voc_evaluator is not None:
         stats.update(voc_evaluator.voc_eval)
     return stats, voc_evaluator
+
+
+@torch.no_grad()
+def visualize(model, postprocessors, data_loader, device, base_ds, image_root, output_dir):
+    model.eval()
+    cat_ids = sorted(base_ds.getCatIds())
+    cats = base_ds.loadCats(cat_ids)
+    id_map = {v: i for i, v in enumerate(cat_ids)}
+    class_names = [c["name"] for c in sorted(cats, key=lambda x: x["id"])]
+
+    os.makedirs(output_dir, exist_ok=True)
+    for samples, targets in tqdm(data_loader):
+        assert len(targets) == 1
+        samples = samples.to(device)
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        image_id = targets[0]["image_id"].item()
+        img_file_name = base_ds.loadImgs(image_id)[0]["file_name"]
+        img_path = os.path.join(image_root, img_file_name)
+
+        outputs = model(samples)
+        orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
+        results = postprocessors['bbox'](outputs, orig_target_sizes)[0]
+        results["scores"] = results["scores"].tolist()
+        results["labels"] = [id_map[label] for label in results["labels"].tolist()]
+        results["boxes"] = results["boxes"].tolist()
+
+        img = np.array(Image.open(img_path))
+        visualizer = Visualizer(img, class_names=class_names)
+        vis = visualizer.draw_instance_predictions(results)
+        fpath = os.path.join(output_dir, img_file_name)
+        vis.save(fpath)
