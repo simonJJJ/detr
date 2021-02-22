@@ -62,16 +62,34 @@ class CGDETR(nn.Module):
 
     def get_reference_points(self, src_shapes, device):
         B, C, H, W = src_shapes
-        bin_size_h = H / 10
-        bin_size_w = W / 10
-        ref_y, ref_x = torch.meshgrid(torch.linspace(bin_size_h / 2, H - bin_size_h / 2, 10, dtype=torch.float32, device=device),
-                                      torch.linspace(bin_size_w / 2, W - bin_size_w / 2, 10, dtype=torch.float32, device=device))
+        step_h = H / 10
+        step_w = W / 10
+        bin_size_h = math.floor(step_h)
+        bin_size_w = math.floor(step_w)
+        ref_y = torch.arange(0, H, step=step_h, dtype=torch.float32, device=device) + bin_size_h / 2 - 0.5
+        ref_x = torch.arange(0, W, step=step_w, dtype=torch.float32, device=device) + bin_size_w / 2 - 0.5
+        ref_y, ref_x = torch.meshgrid(ref_y, ref_x)
         #ref_y = ref_y.reshape(-1)[None, :, None].expand(B, -1, 4).flatten(1) / H  # (B, 10*10)
         #ref_x = ref_x.reshape(-1)[None, :, None].expand(B, -1, 4).flatten(1) / W  # (B, 10*10)
         ref_y = ref_y.reshape(-1)[None].expand(B, -1) / H  # (B, 10*10)
         ref_x = ref_x.reshape(-1)[None].expand(B, -1) / W  # (B, 10*10)
         ref = torch.stack((ref_x, ref_y), -1)  # (B, 10*10, 2)
         return ref
+
+    def get_locations(self, feature, stride=32):
+        h, w = feature.size()[-2:]
+        device = feature.device
+        step_h = h / 10
+        step_w = w / 10
+        bin_size_h = math.floor(step_h)
+        bin_size_w = math.floor(step_w)
+        shifts_y = (torch.arange(0, h, step=step_h, dtype=torch.float32, device=device) + (bin_size_h / 2 - 0.5)) * stride
+        shifts_x = (torch.arange(0, w, step=step_w, dtype=torch.float32, device=device) + (bin_size_w / 2 - 0.5)) * stride
+        shift_y, shift_x = torch.meshgrid(shifts_y, shifts_x)
+        shift_x = shift_x.reshape(-1)
+        shift_y = shift_y.reshape(-1)
+        locations = torch.stack((shift_x, shift_y), dim=1) + stride // 2
+        return locations
 
     def forward(self, samples: NestedTensor):
         """ The forward expects a NestedTensor, which consists of:
@@ -94,7 +112,7 @@ class CGDETR(nn.Module):
 
         src, mask = features[-1].decompose()
         assert mask is not None
-        hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])  # [6, b, num_queries, d_model]
+        hs, grid_weight = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])  # [6, b, num_queries, d_model]
         ref_coord = self.get_reference_points(src.shape, src.device)  # (B, 10*10, 2)
         ref_coord = inverse_sigmoid(ref_coord)
 
@@ -111,18 +129,21 @@ class CGDETR(nn.Module):
         outputs_coord = torch.stack(outputs_coords)
         #outputs_class = self.class_embed(hs)
         #outputs_coord = self.bbox_embed(hs).sigmoid()
-        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
+        locations = self.get_locations(src, stride=32)
+        h, w = src.size()[-2:]
+        feat_size = torch.as_tensor([float(h), float(w)])
+        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], "pred_grid_weight": grid_weight[-1], "locations": locations, "feat_size": feat_size}
         if self.aux_loss:
-            out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
+            out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord, grid_weight, locations, feat_size)
         return out
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord):
+    def _set_aux_loss(self, outputs_class, outputs_coord, grid_weight, locations, feat_size):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
-        return [{'pred_logits': a, 'pred_boxes': b}
-                for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+        return [{'pred_logits': a, 'pred_boxes': b, 'pred_grid_weight': c, "locations": locations, "feat_size": feat_size}
+                for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], grid_weight[:-1])]
 
 
 class SetCriterion(nn.Module):
@@ -156,12 +177,12 @@ class SetCriterion(nn.Module):
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
         assert 'pred_logits' in outputs
-        src_logits = outputs['pred_logits']
+        src_logits = outputs['pred_logits']  # (b, num_queries, 91)
 
         idx = self._get_src_permutation_idx(indices)
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
         target_classes = torch.full(src_logits.shape[:2], self.num_classes,
-                                    dtype=torch.int64, device=src_logits.device)
+                                    dtype=torch.int64, device=src_logits.device)  # (b, num_queries)
         target_classes[idx] = target_classes_o
 
         target_classes_onehot = torch.zeros([src_logits.shape[0], src_logits.shape[1], src_logits.shape[2] + 1],
@@ -215,6 +236,66 @@ class SetCriterion(nn.Module):
         losses['loss_giou'] = loss_giou.sum() / num_boxes
         return losses
 
+    def loss_grid_weight(self, outputs, targets, indices, num_boxes):
+        assert "pred_grid_weight" in outputs
+
+        stride = float(32)
+        grid_weight = outputs["pred_grid_weight"]  # (b, 1, 10, 10)
+        grid_weight = grid_weight.squeeze(1).flatten(1)  # (b, 100)
+        locations = outputs["locations"]  # (10*10, 2)
+        feat_size = outputs["feat_size"]
+        bin_size_h = math.floor(feat_size[0] / 10) * stride
+        bin_size_w = math.floor(feat_size[1] / 10) * stride
+        loc_xs, loc_ys = locations[:, 0], locations[:, 1]  # (100)
+        device = grid_weight.device
+        grid_weight_labels = []
+
+        for im_i in range(len(targets)):
+            targets_per_im = targets[im_i]
+            target_boxes = targets_per_im["boxes"]  # (num_gt_i, 4) cxcywh
+            if target_boxes.numel() == 0:
+                grid_weight_labels.append(grid_weight.new_zeros(grid_weight.shape[1]))
+                continue
+            img_h, img_w = targets_per_im["size"][0], targets_per_im["size"][1]
+            scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=0)
+            target_boxes = target_boxes * scale_fct
+            center_x = target_boxes[:, 0].clone()  # (num_gt_i,)
+            center_y = target_boxes[:, 1].clone()  # (num_gt_i,)
+            target_boxes = box_ops.box_cxcywh_to_xyxy(target_boxes)  # (num_gt_i, 4)
+
+            num_gts = target_boxes.shape[0]
+            K = locations.shape[0]  # (100,)
+            target_boxes = target_boxes[None].expand(K, num_gts, 4)  # (100, num_gt_i, 4)
+            center_x = center_x[None].expand(K, num_gts)  # (100, num_gt_i)
+            center_y = center_y[None].expand(K, num_gts)  # (100, num_gt_i)
+            center_gt = target_boxes.new_zeros(target_boxes.shape)  # (100, num_gt_i, 4)
+            xmin = center_x - stride - bin_size_w / 2  # (100, num_gt_i)
+            ymin = center_y - stride - bin_size_h / 2  # (100, num_gt_i)
+            xmax = center_x + stride + bin_size_w / 2  # (100, num_gt_i)
+            ymax = center_y + stride + bin_size_h / 2  # (100, num_gt_i)
+            center_gt[:, :, 0] = torch.where(xmin > target_boxes[:, :, 0] - bin_size_w / 2, xmin, target_boxes[:, :, 0] - bin_size_w / 2)
+            center_gt[:, :, 1] = torch.where(ymin > target_boxes[:, :, 1] - bin_size_h / 2, ymin, target_boxes[:, :, 1] - bin_size_h / 2)
+            center_gt[:, :, 2] = torch.where(xmax > target_boxes[:, :, 2] + bin_size_w / 2, target_boxes[:, :, 2] + bin_size_w / 2, xmax)
+            center_gt[:, :, 3] = torch.where(ymax > target_boxes[:, :, 3] + bin_size_h / 2, target_boxes[:, :, 3] + bin_size_h / 2, ymax)
+
+            left = loc_xs[:, None] - center_gt[..., 0]  # (100, num_gt_i)
+            right = center_gt[..., 2] - loc_xs[:, None]
+            top = loc_ys[:, None] - center_gt[..., 1]
+            bottom = center_gt[..., 3] - loc_ys[:, None]
+            center_bbox = torch.stack((left, top, right, bottom), -1)  # (100, num_gt_i, 4)
+            inside_gt_bbox_mask = center_bbox.min(-1)[0] > 0  # (100, num_gt_i)
+            grid_mask = inside_gt_bbox_mask.sum(1) > 0  # (100, )
+
+            grid_weight_label = torch.zeros(loc_xs.shape[0], dtype=torch.float32, device=device)
+            grid_weight_label[grid_mask] = 1
+            grid_weight_labels.append(grid_weight_label)
+
+        grid_weight_labels = torch.stack(grid_weight_labels, dim=0)  # (b, 100)
+        loss_grid_weight = F.binary_cross_entropy(grid_weight, grid_weight_labels)
+
+        losses = {'loss_grid_w': loss_grid_weight}
+        return losses
+
     def loss_masks(self, outputs, targets, indices, num_boxes):
         """Compute the losses related to the masks: the focal loss and the dice loss.
            targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
@@ -261,6 +342,7 @@ class SetCriterion(nn.Module):
             'labels': self.loss_labels,
             'cardinality': self.loss_cardinality,
             'boxes': self.loss_boxes,
+            'grid_w': self.loss_grid_weight,
             'masks': self.loss_masks
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
@@ -328,7 +410,7 @@ class PostProcess(nn.Module):
         #prob = F.softmax(out_logits, -1)
         #scores, labels = prob[..., :-1].max(-1)
 
-        prob = out_logits.sigmoid()
+        prob = out_logits.sigmoid()  # (b, num_queries, 91)
         topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)
         scores = topk_values
         topk_boxes = topk_indexes // out_logits.shape[2]
@@ -390,6 +472,7 @@ def build(args):
     matcher = build_matcher(args)
     weight_dict = {'loss_ce': 2, 'loss_bbox': args.bbox_loss_coef}
     weight_dict['loss_giou'] = args.giou_loss_coef
+    weight_dict['loss_grid_w'] = 1
     if args.masks:
         weight_dict["loss_mask"] = args.mask_loss_coef
         weight_dict["loss_dice"] = args.dice_loss_coef
@@ -400,7 +483,7 @@ def build(args):
             aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
 
-    losses = ['labels', 'boxes', 'cardinality']
+    losses = ['labels', 'boxes', 'cardinality', 'grid_w']
     if args.masks:
         losses += ["masks"]
     criterion = SetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict,
