@@ -9,6 +9,9 @@ from torch import nn
 from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 
 
+INF = 100000000
+
+
 class HungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
 
@@ -58,6 +61,8 @@ class HungarianMatcher(nn.Module):
         #out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
         out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()  # (b * num_queries, num_classes)
         out_bbox = outputs["pred_boxes"].flatten(0, 1)  # (b * num_queries, 4)
+        #out_grid_w = outputs['pred_grid_weight'].flatten(0, 1)  # (b * num_queries, 1)
+        #out_prob = out_prob * out_grid_w
 
         # Also concat the target labels and boxes
         tgt_ids = torch.cat([v["labels"] for v in targets])  # (sigma num_gt_i)
@@ -81,7 +86,9 @@ class HungarianMatcher(nn.Module):
 
         # Final cost matrix
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-        C = C.view(bs, num_queries, -1).cpu()  # (b, num_queries, sigma num_gt_i)
+        C = C.view(bs, num_queries, -1)
+        #C[~inside_gt_bbox_masks.unsqueeze(0).expand(bs, -1, -1)] = INF
+        C = C.cpu()  # (b, num_queries, sigma num_gt_i)
 
         sizes = [len(v["boxes"]) for v in targets]
         # c[i] shape: (num_queries, num_gt_i)

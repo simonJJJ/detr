@@ -58,7 +58,7 @@ class LocalGridAlignAttention(nn.Module):
         self.query_conv = nn.Conv2d(in_channels, in_channels, 1)
         self.key_conv = nn.Conv2d(in_channels, in_channels, 1)
         self.value_conv = nn.Conv2d(in_channels, in_channels, 1)
-        self.grid_conv = nn.Conv2d(in_channels, 1, 1)
+        #self.grid_conv = nn.Conv2d(in_channels, 1, 1)
         self.scaling = float(in_channels // 8) ** -0.5
 
         xavier_uniform_(self.query_conv.weight.data)
@@ -67,8 +67,8 @@ class LocalGridAlignAttention(nn.Module):
         constant_(self.key_conv.bias.data, 0.)
         xavier_uniform_(self.value_conv.weight.data)
         constant_(self.value_conv.bias.data, 0.)
-        constant_(self.grid_conv.weight.data, 0.)
-        constant_(self.grid_conv.bias.data, 0.)
+        #constant_(self.grid_conv.weight.data, 0.)
+        #constant_(self.grid_conv.bias.data, 0.)
 
     def forward(self, x, featmap, padding_mask=None):
         proj_query = self.query_conv(x)
@@ -90,9 +90,9 @@ class LocalGridAlignAttention(nn.Module):
         attention = F.softmax(attn_weight, 1)
         out = ga_align_map(attention, proj_value)  # (b * 8, c, 10, 10)
         out = out.contiguous().view(bsz, embed_dim, h, w)
-        grid_weight = self.grid_conv(out).sigmoid()  # (b, 1, 10, 10)
+        #grid_weight = self.grid_conv(out).sigmoid()  # (b, 1, 10, 10)
 
-        return out, grid_weight
+        return out
 
 
 class GaAlignModule(nn.Module):
@@ -105,7 +105,7 @@ class GaAlignModule(nn.Module):
         constant_(self.out_conv.bias.data, 0.)
 
     def forward(self, x, featmap, padding_mask=None):
-        out, grid_weight = self.ga_align(x, featmap, padding_mask)
+        out = self.ga_align(x, featmap, padding_mask)
         out = self.out_conv(out)
 
-        return out, grid_weight
+        return out

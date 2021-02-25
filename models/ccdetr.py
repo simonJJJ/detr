@@ -16,10 +16,10 @@ from .backbone import build_backbone
 from .matcher import build_matcher
 from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
                            dice_loss, sigmoid_focal_loss)
-from .ccgrid_transformer import build_transformer
+from .cc_transformer import build_transformer
 
 
-class CGDETR(nn.Module):
+class CCDETR(nn.Module):
     """ This is the DETR module that performs object detection """
     def __init__(self, backbone, transformer, num_classes, num_queries, aux_loss=False, cc_tr=False):
         """ Initializes the model.
@@ -37,7 +37,6 @@ class CGDETR(nn.Module):
         hidden_dim = transformer.d_model
         self.class_embed = nn.Linear(hidden_dim, num_classes)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
-        self.grid_linear = nn.Linear(hidden_dim, 1)
         self.query_embed = nn.Embedding(num_queries, hidden_dim*2)
         self.input_proj = nn.Sequential(
             nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1),
@@ -113,17 +112,14 @@ class CGDETR(nn.Module):
 
         src, mask = features[-1].decompose()
         assert mask is not None
-        hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])  # [6, b, num_queries, d_model]
-        grid_weight = self.grid_linear(hs).sigmoid()  # [6, b, num_queries, d_model]
-        ref_coord = self.get_reference_points(src.shape, src.device)  # (B, 10*10, 2)
-        ref_coord = inverse_sigmoid(ref_coord)
+        hs, sampling_points = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])  # [6, b, num_queries, d_model]
 
         outputs_classes = []
         outputs_coords = []
         for lvl in range(hs.shape[0]):
             outputs_class = self.class_embed[lvl](hs[lvl])
             tmp = self.bbox_embed[lvl](hs[lvl])
-            tmp[..., :2] += ref_coord
+            tmp[..., :2] += inverse_sigmoid(sampling_points)
             outputs_coord = tmp.sigmoid()
             outputs_classes.append(outputs_class)
             outputs_coords.append(outputs_coord)
@@ -131,21 +127,18 @@ class CGDETR(nn.Module):
         outputs_coord = torch.stack(outputs_coords)
         #outputs_class = self.class_embed(hs)
         #outputs_coord = self.bbox_embed(hs).sigmoid()
-        locations = self.get_locations(src, stride=32)
-        h, w = src.size()[-2:]
-        feat_size = torch.as_tensor([float(h), float(w)])
-        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], "pred_grid_weight": grid_weight[-1], "locations": locations, "feat_size": feat_size}
+        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
         if self.aux_loss:
-            out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord, grid_weight, locations, feat_size)
+            out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
         return out
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord, grid_weight, locations, feat_size):
+    def _set_aux_loss(self, outputs_class, outputs_coord):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
-        return [{'pred_logits': a, 'pred_boxes': b, 'pred_grid_weight': c, "locations": locations, "feat_size": feat_size}
-                for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], grid_weight[:-1])]
+        return [{'pred_logits': a, 'pred_boxes': b}
+                for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
 
 
 class SetCriterion(nn.Module):
@@ -370,8 +363,9 @@ class SetCriterion(nn.Module):
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
         # Retrieve the matching between the outputs of the last layer and the targets
-        self.grid_weight_target, self.inside_gt_bbox_masks= self.get_grid_weight_target(outputs, targets)
-        indices = self.matcher(outputs_without_aux, targets, self.inside_gt_bbox_masks)
+        #self.grid_weight_target, self.inside_gt_bbox_masks= self.get_grid_weight_target(outputs, targets)
+        #indices = self.matcher(outputs_without_aux, targets, self.inside_gt_bbox_masks)
+        indices = self.matcher(outputs_without_aux, targets)
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
@@ -388,7 +382,7 @@ class SetCriterion(nn.Module):
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
-                indices = self.matcher(aux_outputs, targets, self.inside_gt_bbox_masks)
+                indices = self.matcher(aux_outputs, targets)
                 for loss in self.losses:
                     if loss == 'masks':
                         # Intermediate masks losses are too costly to compute, we ignore them.
@@ -415,7 +409,7 @@ class PostProcess(nn.Module):
                           For evaluation, this must be the original image size (before any data augmentation)
                           For visualization, this should be the image size after data augment, but before padding
         """
-        out_logits, out_bbox, out_grid_w = outputs['pred_logits'], outputs['pred_boxes'], outputs['pred_grid_weight']
+        out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
 
         assert len(out_logits) == len(target_sizes)
         assert target_sizes.shape[1] == 2
@@ -423,10 +417,11 @@ class PostProcess(nn.Module):
         #prob = F.softmax(out_logits, -1)
         #scores, labels = prob[..., :-1].max(-1)
 
-        score = out_logits.sigmoid()  # (b, num_queries, 91)
-        prob = score * out_grid_w  # (b, num_queries, 91)
+        prob = out_logits.sigmoid()  # (b, num_queries, 91)
+        #prob = score * out_grid_w  # (b, num_queries, 91)
         topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)  # (b, 100)
-        scores = torch.gather(score.view(out_logits.shape[0], -1), dim=1, index=topk_indexes)
+        scores = topk_values
+        #scores = torch.gather(score.view(out_logits.shape[0], -1), dim=1, index=topk_indexes)
         topk_boxes = topk_indexes // out_logits.shape[2]
         labels = topk_indexes % out_logits.shape[2]
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
@@ -473,7 +468,7 @@ def build(args):
 
     transformer = build_transformer(args)
 
-    model = CGDETR(
+    model = CCDETR(
         backbone,
         transformer,
         num_classes=num_classes,
@@ -486,7 +481,7 @@ def build(args):
     matcher = build_matcher(args)
     weight_dict = {'loss_ce': 2, 'loss_bbox': args.bbox_loss_coef}
     weight_dict['loss_giou'] = args.giou_loss_coef
-    weight_dict['loss_grid_w'] = 1
+    #weight_dict['loss_grid_w'] = 1
     if args.masks:
         weight_dict["loss_mask"] = args.mask_loss_coef
         weight_dict["loss_dice"] = args.dice_loss_coef
@@ -497,7 +492,7 @@ def build(args):
             aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
 
-    losses = ['labels', 'boxes', 'cardinality', 'grid_w']
+    losses = ['labels', 'boxes', 'cardinality']
     if args.masks:
         losses += ["masks"]
     criterion = SetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict,
