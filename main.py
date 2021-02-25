@@ -22,7 +22,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
     parser.add_argument('--lr_backbone', default=1e-5, type=float)
-    parser.add_argument('--lr_linear_proj_names', default=['reference_points', 'sampling_offsets'], type=str, nargs='+')
+    parser.add_argument('--lr_linear_proj_names', default=['reference_points', 'sampling_offsets', 'sampling_points'], type=str, nargs='+')
     parser.add_argument('--lr_ft', default=1e-5, type=float)
     parser.add_argument('--lr_ccdecode', default=1e-5, type=float)
     parser.add_argument('--lr_grida', default=1e-5, type=float)
