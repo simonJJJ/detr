@@ -34,16 +34,29 @@ class CCTransformer(nn.Module):
         nn.init.xavier_uniform_(self.sampling_points.weight.data, gain=1.0)
         nn.init.constant_(self.sampling_points.bias.data, 0.)
 
+    def get_valid_ratio(self, mask):
+        _, H, W = mask.shape
+        valid_H = torch.sum(~mask[:, :, 0], 1)
+        valid_W = torch.sum(~mask[:, 0, :], 1)
+        valid_ratio_h = valid_H.float() / H
+        valid_ratio_w = valid_W.float() / W
+        valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
+        return valid_ratio  # (b, 2)
+
     def forward(self, src, mask, query_embed, pos_embed):
         b, c, h, w = src.shape
         memory = self.encoder(src, pos_embed, mask)
+
+        valid_ratios = torch.stack([self.get_valid_ratio(m) for m in [mask]], 1)  # (b, 1, 2)
 
         query_embed, tgt = torch.split(query_embed, c, dim=1)
         query_embed = query_embed.unsqueeze(0).expand(b, -1, -1)  # (b, num_queries, c)
         tgt = tgt.unsqueeze(0).expand(b, -1, -1)  # (b, num_queries, c)
         sampling_points = self.sampling_points(query_embed).sigmoid()  # (b, num_queries, 2)
+        num_query = sampling_points.shape[1]
+        sampling_points_input = sampling_points.unsqueeze(2).expand(b, num_query, self.nhead, 2)
 
-        hs = self.decoder(tgt, sampling_points, memory, query_embed, mask)
+        hs = self.decoder(tgt, sampling_points_input, memory, valid_ratios, query_embed, pos_embed, mask)
         return hs, sampling_points
 
 
@@ -82,7 +95,7 @@ class CCTransformerEncoderLayer(nn.Module):
         src = self.norm1(src)
 
         src = self.forward_ffn(src)
-        src = src.transpose(1, 2).reshape(-1, c, h, w).contiguous()
+        src = src.transpose(1, 2).reshape(b, c, h, w).contiguous()
 
         return src
 
@@ -134,13 +147,13 @@ class CCTransformerDecoderLayer(nn.Module):
         tgt = self.norm3(tgt)
         return tgt
 
-    def forward(self, tgt, sampling_points, query_pos, src, src_padding_mask=None):
+    def forward(self, tgt, sampling_points, query_pos, src, pos_embed=None, src_padding_mask=None):
         q = k = self.with_pos_embed(tgt, query_pos)
         tgt2 = self.self_attn(q.transpose(0, 1), k.transpose(0, 1), tgt.transpose(0, 1))[0].transpose(0, 1)
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)  # (b, num_queries, c)
 
-        tgt2 = self.cross_attn(self.with_pos_embed(tgt, query_pos), src, sampling_points, src_padding_mask)
+        tgt2 = self.cross_attn(self.with_pos_embed(tgt, query_pos), self.with_pos_embed(src, pos_embed), src, sampling_points, src_padding_mask)
         tgt = tgt + self.dropout1(tgt2)  # (b, num_queries, c)
         tgt = self.norm1(tgt)
 
@@ -157,12 +170,14 @@ class CCTransformerDecoder(nn.Module):
         self.num_layers = num_layers
         self.return_intermediate = return_intermediate
 
-    def forward(self, tgt, sampling_points, src, query_pos=None, src_padding_mask=None):
+    def forward(self, tgt, sampling_points, src, src_valid_ratios, query_pos=None, pos_embed=None, src_padding_mask=None):
         output = tgt
 
         intermediate = []
         for layer in self.layers:
-            output = layer(output, sampling_points, query_pos, src, src_padding_mask)
+            #reference_points_input = reference_points[:, :, None] * src_valid_ratios[:, None]
+            sampling_points_input = sampling_points * src_valid_ratios[:, None]
+            output = layer(output, sampling_points_input, query_pos, src, pos_embed, src_padding_mask)
 
             if self.return_intermediate:
                 intermediate.append(output)

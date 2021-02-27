@@ -72,9 +72,9 @@ class CrossCCAttention(nn.Module):
         xavier_uniform_(self.output_conv.weight.data)
         constant_(self.output_conv.bias.data, 0.)
 
-    def forward(self, query, value, sampling_points, padding_mask=None):
+    def forward(self, query, key, value, sampling_points, padding_mask=None):
         proj_query = self.query_conv(query)
-        proj_key = self.key_conv(value)
+        proj_key = self.key_conv(key)
         proj_value = self.value_conv(value)
         if padding_mask is not None:
             proj_value = proj_value.masked_fill(padding_mask[:, None], float(0))
