@@ -113,13 +113,14 @@ class CCDETR(nn.Module):
         src, mask = features[-1].decompose()
         assert mask is not None
         hs, sampling_points = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])  # [6, b, num_queries, d_model]
+        sampling_points = inverse_sigmoid(sampling_points)
 
         outputs_classes = []
         outputs_coords = []
         for lvl in range(hs.shape[0]):
             outputs_class = self.class_embed[lvl](hs[lvl])
             tmp = self.bbox_embed[lvl](hs[lvl])
-            tmp[..., :2] += inverse_sigmoid(sampling_points)
+            tmp[..., :2] += sampling_points
             outputs_coord = tmp.sigmoid()
             outputs_classes.append(outputs_class)
             outputs_coords.append(outputs_coord)
@@ -418,10 +419,8 @@ class PostProcess(nn.Module):
         #scores, labels = prob[..., :-1].max(-1)
 
         prob = out_logits.sigmoid()  # (b, num_queries, 91)
-        #prob = score * out_grid_w  # (b, num_queries, 91)
         topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)  # (b, 100)
         scores = topk_values
-        #scores = torch.gather(score.view(out_logits.shape[0], -1), dim=1, index=topk_indexes)
         topk_boxes = topk_indexes // out_logits.shape[2]
         labels = topk_indexes % out_logits.shape[2]
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
